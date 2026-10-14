@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use gpui_kit::{AssetSource, Result, SharedString};
 
 // Lucide icons beyond the default set that gpui-kit bundles.
-gpui_kit::assets::icon_assets!(ExtraIcons, [Shield, ShieldAlert, ShieldCheck, GitCompare, Columns2]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [Shield, ShieldAlert, ShieldCheck, GitCompare, Columns2, Server]);
 
 pub struct Assets;
 

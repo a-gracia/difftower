@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use difftower_core::{Approvals, ChangeStatus, Guard, Repo, dir_rule, file_rule};
+use difftower_core::{Approvals, ChangeStatus, Guard, Repo, dir_rule, file_rule, load_rules, save_rules};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git").current_dir(dir).args(args).status().unwrap().success();
@@ -115,22 +115,21 @@ fn head_of_a_repo_without_commits_is_the_empty_tree() {
 fn guard_rules_for_files_and_dirs() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(".difftower.toml"), "[guard]\nprotect = [\"tests/**\"]\n").unwrap();
-    let mut guard = Guard::load(dir.path()).unwrap();
+    let guard = Guard::new(load_rules(dir.path()).unwrap()).unwrap();
     assert!(guard.is_protected("tests/spec.rs"));
     assert!(guard.is_protected("tests/deep/spec.rs"));
     assert!(!guard.is_protected("src/main.rs"));
 
-    guard.set_rule(&file_rule("src/[weird].rs"), true).unwrap();
-    guard.set_rule(&dir_rule("db"), true).unwrap();
-    let mut guard = Guard::load(dir.path()).unwrap();
+    let guard = guard.with_rule(&file_rule("src/[weird].rs"), true).unwrap();
+    let guard = guard.with_rule(&dir_rule("db"), true).unwrap();
+    save_rules(dir.path(), guard.patterns()).unwrap();
+    let guard = Guard::new(load_rules(dir.path()).unwrap()).unwrap();
     assert!(guard.is_protected("src/[weird].rs"));
     assert!(!guard.is_protected("src/w.rs"));
     assert!(guard.is_protected("db/migrations/001.sql"));
     assert!(guard.has_rule(&dir_rule("db")));
     assert_eq!(guard.rules_for("db/x.sql"), [2]);
-
-    guard.set_rule("tests/**", false).unwrap();
-    assert!(!Guard::load(dir.path()).unwrap().is_protected("tests/spec.rs"));
+    assert!(!guard.with_rule("tests/**", false).unwrap().is_protected("tests/spec.rs"));
 }
 
 #[test]
@@ -150,15 +149,17 @@ fn approvals_cover_one_exact_patch_and_persist() {
     fs::write(dir.path().join("tests/spec.rs"), "assert!(false);\n").unwrap();
     let change = repo.changes(&head).unwrap().files.into_iter().find(|c| c.path == "tests/spec.rs").unwrap();
 
-    let mut approvals = Approvals::load(&repo);
-    approvals.approve(&change).unwrap();
-    assert!(Approvals::load(&repo).is_approved(&change));
+    let mut approvals = Approvals::default();
+    approvals.approve(&change);
+    repo.write_approvals(&approvals.to_text()).unwrap();
+    let mut approvals = Approvals::parse(&repo.read_approvals().unwrap());
+    assert!(approvals.is_approved(&change));
 
     // A further edit by the agent is not covered by the earlier approval.
     fs::write(dir.path().join("tests/spec.rs"), "assert!(1 == 2);\n").unwrap();
     let changes = repo.changes(&head).unwrap().files;
     let edited = changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
     assert!(!approvals.is_approved(edited));
-    approvals.retain_current(&changes).unwrap();
-    assert!(!Approvals::load(&repo).is_approved(&change));
+    assert!(approvals.retain_current(&changes));
+    assert!(!approvals.is_approved(&change));
 }

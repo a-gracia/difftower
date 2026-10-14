@@ -4,12 +4,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use serde::{Deserialize, Serialize};
 
 /// A git tree object id.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TreeId(pub String);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChangeStatus {
     Added,
     Deleted,
@@ -18,13 +19,13 @@ pub enum ChangeStatus {
     TypeChanged,
 }
 
-/// One file that differs between the baseline and the working tree.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One file that differs between the base tree and the working tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Change {
     pub status: ChangeStatus,
     /// Path relative to the repository root, after any rename.
     pub path: String,
-    /// The path in the baseline, for renames.
+    /// The path in the base tree, for renames.
     pub old_path: Option<String>,
     /// This file's section of the unified patch.
     pub patch: String,
@@ -55,6 +56,9 @@ pub struct Repo {
 impl Repo {
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        if !path.is_dir() {
+            bail!("{} does not exist or is not a directory", path.display());
+        }
         let root = git_output(path, &["rev-parse", "--show-toplevel"], None)
             .with_context(|| format!("{} is not inside a git repository", path.display()))?;
         let root = PathBuf::from(root.trim_end());
@@ -107,17 +111,17 @@ impl Repo {
         Ok(TreeId(id.trim_end().to_owned()))
     }
 
-    /// Everything that changed in the working tree since `baseline`.
-    pub fn changes(&self, baseline: &TreeId) -> Result<Changes> {
+    /// Everything in the working tree that differs from `base`.
+    pub fn changes(&self, base: &TreeId) -> Result<Changes> {
         let current = self.snapshot()?;
-        if current == *baseline {
+        if current == *base {
             return Ok(Changes::default());
         }
         let names = self.git(&[
-            "diff-tree", "-r", "-z", "-M", "--name-status", "--no-ext-diff", &baseline.0, &current.0,
+            "diff-tree", "-r", "-z", "-M", "--name-status", "--no-ext-diff", &base.0, &current.0,
         ])?;
         let patch = self.git(&[
-            "diff-tree", "-r", "-M", "-p", "--no-color", "--no-ext-diff", "--full-index", &baseline.0,
+            "diff-tree", "-r", "-M", "-p", "--no-color", "--no-ext-diff", "--full-index", &base.0,
             &current.0,
         ])?;
         let mut files = parse_name_status(&names)?;
@@ -131,6 +135,22 @@ impl Repo {
         Ok(Changes { files })
     }
 
+    /// Accepted changes to protected files, as stored by [`crate::Approvals::to_text`].
+    pub fn read_approvals(&self) -> Result<String> {
+        match std::fs::read_to_string(self.approvals_path()) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            result => Ok(result?),
+        }
+    }
+
+    pub fn write_approvals(&self, text: &str) -> Result<()> {
+        Ok(std::fs::write(self.approvals_path(), text)?)
+    }
+
+    fn approvals_path(&self) -> PathBuf {
+        self.git_dir.join("difftower").join("approvals")
+    }
+
     /// Every file in the working tree as of the last snapshot, ignored files
     /// excluded, sorted by path.
     pub fn files(&self) -> Result<Vec<String>> {
@@ -138,20 +158,20 @@ impl Repo {
         Ok(out.split('\0').filter(|f| !f.is_empty()).map(str::to_owned).collect())
     }
 
-    /// Restores one changed file to its baseline state on disk.
-    pub fn revert(&self, baseline: &TreeId, change: &Change) -> Result<()> {
+    /// Restores one changed file to its state in `base`.
+    pub fn revert(&self, base: &TreeId, change: &Change) -> Result<()> {
         match change.status {
             ChangeStatus::Added => self.remove(&change.path),
             ChangeStatus::Renamed => {
                 self.remove(&change.path)?;
-                self.restore(baseline, change.old_path.as_deref().unwrap_or(&change.path))
+                self.restore(base, change.old_path.as_deref().unwrap_or(&change.path))
             }
-            _ => self.restore(baseline, &change.path),
+            _ => self.restore(base, &change.path),
         }
     }
 
-    fn restore(&self, baseline: &TreeId, path: &str) -> Result<()> {
-        self.git(&["restore", "--source", &baseline.0, "--worktree", "--", path])?;
+    fn restore(&self, base: &TreeId, path: &str) -> Result<()> {
+        self.git(&["restore", "--source", &base.0, "--worktree", "--", path])?;
         Ok(())
     }
 

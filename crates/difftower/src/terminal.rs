@@ -1,7 +1,11 @@
 //! A terminal panel for running agents next to their diff, built on
 //! `alacritty_terminal` for parsing and the PTY, and painted with GPUI.
 
-use std::{borrow::Cow, path::Path, sync::{Arc, OnceLock}};
+use std::{
+    borrow::Cow,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 
 use alacritty_terminal::{
     Term,
@@ -19,6 +23,14 @@ use gpui_kit::*;
 
 const FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 1.3;
+
+/// What the terminal runs.
+pub enum TerminalCommand {
+    /// The user's shell in a local directory.
+    Shell { cwd: PathBuf },
+    /// A program, such as `ssh -t host`, that provides the shell itself.
+    Program { program: String, args: Vec<String> },
+}
 
 #[derive(Clone)]
 struct Listener(async_channel::Sender<TermEvent>);
@@ -40,7 +52,7 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
-    pub fn new(cwd: &Path, window: &mut Window, cx: &mut App) -> anyhow::Result<Entity<Self>> {
+    pub fn new(command: TerminalCommand, window: &mut Window, cx: &mut App) -> anyhow::Result<Entity<Self>> {
         let (tx, rx) = async_channel::unbounded();
         let listener = Listener(tx);
         let size = (80, 24);
@@ -49,8 +61,13 @@ impl TerminalView {
             &TermSize::new(size.0, size.1),
             listener.clone(),
         )));
+        let (shell, working_directory) = match command {
+            TerminalCommand::Shell { cwd } => (None, Some(cwd)),
+            TerminalCommand::Program { program, args } => (Some(tty::Shell::new(program, args)), None),
+        };
         let options = tty::Options {
-            working_directory: Some(cwd.to_path_buf()),
+            shell,
+            working_directory,
             env: [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")]
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -168,6 +185,13 @@ impl TerminalView {
             term.scroll_display(Scroll::Delta(lines));
         }
         cx.notify();
+    }
+}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        // Ends the PTY loop, which hangs up the shell or the ssh session.
+        let _ = self.pty.send(Msg::Shutdown);
     }
 }
 

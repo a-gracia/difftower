@@ -47,6 +47,25 @@ adds or removes the rule for it (`path` for a file, `path/**` for a folder).
 | `Ctrl+2` | Files |
 | `Ctrl+3` | Protected |
 
+## Remote repositories over SSH
+
+```sh
+difftower user@host:/path/to/repo
+difftower myserver:~/code/app      # any host from ~/.ssh/config
+```
+
+Difftower uses your own `ssh`, so keys, `~/.ssh/config`, `ProxyJump` and
+the rest work as usual. On first connection it installs a small static
+agent (about 3 MB, a few MB of RAM) in `~/.cache/difftower/` on the host;
+the agent watches the repository there and sends only diffs. Each
+Difftower version carries its matching agent and replaces the old one on
+the next connection, so there is nothing to install or update by hand.
+The terminal opens a shell on the host in the repository, so agents run
+there. All of it shares one SSH connection.
+
+Requirements on the host: Linux x86_64 and git. Authentication must not
+prompt (use a key or an SSH agent).
+
 ## How it works
 
 The working tree, untracked files included, is written as a git tree
@@ -60,8 +79,14 @@ Requires Rust 1.90+ and git. Linux only for now.
 
 ```sh
 cargo build --release
-./target/release/difftower [path/to/repo]
+./target/release/difftower                    # start screen with recent repositories
+./target/release/difftower path/to/repo       # open a local repository
+./target/release/difftower user@host:/repo    # open one over SSH
 ```
+
+Without arguments Difftower shows a start screen: type a path or
+`user@host:/path`, choose a folder, or reopen a recent repository. The icon
+at the top left of a workspace goes back to it.
 
 ## Roadmap
 
@@ -69,7 +94,7 @@ cargo build --release
 - [x] Integrated terminal to run agents side by side
 - [ ] Line comments sent back to the agent as prompts
 - [ ] Agent hooks that block edits to protected files before they happen
-- [ ] Remote folders over SSH via a tiny server-side agent
+- [x] Remote folders over SSH via a tiny server-side agent
 - [ ] Several agents / git worktrees at once
 - [ ] macOS
 

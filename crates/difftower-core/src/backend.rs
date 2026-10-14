@@ -1,0 +1,104 @@
+use std::{any::Any, path::Path};
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::{Change, Repo, TreeId, guard};
+
+/// Everything the UI shows about a repository at one moment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Status {
+    /// The tree the changes are measured against: HEAD.
+    pub base: TreeId,
+    pub changes: Vec<Change>,
+    /// Every file in the working tree, ignored files excluded.
+    pub files: Vec<String>,
+    /// Protection rules from `.difftower.toml`.
+    pub rules: Vec<String>,
+    /// Why the rules could not be read, if they could not.
+    pub rules_error: Option<String>,
+    /// Stored approvals, in [`crate::Approvals::to_text`] format.
+    pub approvals: String,
+}
+
+/// A repository, on this machine or on a remote host.
+pub trait Backend: Send + Sync {
+    /// The repository's directory name.
+    fn name(&self) -> String;
+    /// The host the repository lives on, for remote backends.
+    fn host(&self) -> Option<String>;
+    /// Absolute path of the repository root on its host.
+    fn root(&self) -> String;
+    fn status(&self) -> Result<Status>;
+    fn revert(&self, base: &TreeId, change: &Change) -> Result<()>;
+    fn read_file(&self, path: &str) -> Result<Vec<u8>>;
+    fn save_rules(&self, rules: &[String]) -> Result<()>;
+    fn save_approvals(&self, text: &str) -> Result<()>;
+    /// Calls `on_change` whenever the working tree or HEAD changes, until
+    /// the returned handle is dropped.
+    fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>>;
+}
+
+/// A repository on this machine.
+pub struct Local {
+    repo: Repo,
+}
+
+impl Local {
+    pub fn new(repo: Repo) -> Self {
+        Self { repo }
+    }
+}
+
+impl Backend for Local {
+    fn name(&self) -> String {
+        dir_name(&self.root())
+    }
+
+    fn host(&self) -> Option<String> {
+        None
+    }
+
+    fn root(&self) -> String {
+        self.repo.root().display().to_string()
+    }
+
+    fn status(&self) -> Result<Status> {
+        let base = self.repo.head_tree()?;
+        let changes = self.repo.changes(&base)?.files;
+        let files = self.repo.files()?;
+        let (rules, rules_error) = match guard::load_rules(self.repo.root()) {
+            Ok(rules) => (rules, None),
+            Err(err) => (Vec::new(), Some(err.to_string())),
+        };
+        let approvals = self.repo.read_approvals()?;
+        Ok(Status { base, changes, files, rules, rules_error, approvals })
+    }
+
+    fn revert(&self, base: &TreeId, change: &Change) -> Result<()> {
+        self.repo.revert(base, change)
+    }
+
+    fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(std::fs::read(self.repo.root().join(path))?)
+    }
+
+    fn save_rules(&self, rules: &[String]) -> Result<()> {
+        guard::save_rules(self.repo.root(), rules)
+    }
+
+    fn save_approvals(&self, text: &str) -> Result<()> {
+        self.repo.write_approvals(text)
+    }
+
+    fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>> {
+        Ok(Box::new(crate::watch(&self.repo, on_change)?))
+    }
+}
+
+pub(crate) fn dir_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
+}

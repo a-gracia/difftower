@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -21,34 +21,24 @@ struct GuardConfig {
 }
 
 /// The set of protected paths of one repository.
+#[derive(Clone)]
 pub struct Guard {
-    path: PathBuf,
     patterns: Vec<String>,
     set: GlobSet,
 }
 
 impl Guard {
-    pub fn load(root: &Path) -> Result<Self> {
-        let path = root.join(CONFIG_FILE);
-        let config: Config = match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text)?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(err) => return Err(err.into()),
-        };
-        Self::new(path, config.guard.protect)
-    }
-
-    /// A guard that protects nothing, used when the configuration is unreadable.
-    pub fn empty(root: &Path) -> Self {
-        Self::new(root.join(CONFIG_FILE), Vec::new()).expect("empty glob set")
-    }
-
-    fn new(path: PathBuf, patterns: Vec<String>) -> Result<Self> {
+    pub fn new(patterns: Vec<String>) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         for pattern in &patterns {
             builder.add(Glob::new(pattern)?);
         }
-        Ok(Self { path, patterns, set: builder.build()? })
+        Ok(Self { patterns, set: builder.build()? })
+    }
+
+    /// A guard that protects nothing.
+    pub fn empty() -> Self {
+        Self::new(Vec::new()).expect("empty glob set")
     }
 
     pub fn patterns(&self) -> &[String] {
@@ -68,15 +58,14 @@ impl Guard {
         self.patterns.iter().any(|p| p == pattern)
     }
 
-    /// Adds or removes one rule and saves the configuration.
-    pub fn set_rule(&mut self, pattern: &str, enabled: bool) -> Result<()> {
+    /// This guard with one rule added or removed.
+    pub fn with_rule(&self, pattern: &str, enabled: bool) -> Result<Self> {
         let mut patterns = self.patterns.clone();
         patterns.retain(|p| p != pattern);
         if enabled {
             patterns.push(pattern.to_owned());
         }
-        *self = Self::new(self.path.clone(), patterns)?;
-        self.save()
+        Self::new(patterns)
     }
 }
 
@@ -90,23 +79,30 @@ pub fn dir_rule(dir: &str) -> String {
     format!("{}/**", globset::escape(dir))
 }
 
-impl Guard {
-    fn save(&self) -> Result<()> {
-        // Keep any other sections a user wrote by hand.
-        let mut doc: toml::Table = match std::fs::read_to_string(&self.path) {
-            Ok(text) => toml::from_str(&text)?,
-            Err(_) => toml::Table::new(),
-        };
-        let guard = doc
-            .entry("guard")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if let toml::Value::Table(guard) = guard {
-            guard.insert(
-                "protect".into(),
-                toml::Value::Array(self.patterns.iter().cloned().map(toml::Value::String).collect()),
-            );
-        }
-        std::fs::write(&self.path, toml::to_string_pretty(&doc)?)?;
-        Ok(())
+/// Reads the protection rules from the repository's configuration file.
+pub fn load_rules(root: &Path) -> Result<Vec<String>> {
+    let config: Config = match std::fs::read_to_string(root.join(CONFIG_FILE)) {
+        Ok(text) => toml::from_str(&text)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(config.guard.protect)
+}
+
+/// Writes the protection rules, keeping any other settings in the file.
+pub fn save_rules(root: &Path, patterns: &[String]) -> Result<()> {
+    let path = root.join(CONFIG_FILE);
+    let mut doc: toml::Table = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text)?,
+        Err(_) => toml::Table::new(),
+    };
+    let guard = doc.entry("guard").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(guard) = guard {
+        guard.insert(
+            "protect".into(),
+            toml::Value::Array(patterns.iter().cloned().map(toml::Value::String).collect()),
+        );
     }
+    std::fs::write(&path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
 }

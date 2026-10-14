@@ -1,0 +1,15 @@
+[package]
+name = "difftower-agent"
+description = "Serves a repository to Difftower over SSH"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.23.1"
+difftower-core.workspace = true
+serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"

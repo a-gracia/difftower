@@ -2,12 +2,14 @@ mod diff_view;
 mod sidebar;
 
 use std::{
+    any::Any,
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     rc::Rc,
+    sync::Arc,
 };
 
-use difftower_core::{Approvals, Change, Guard, Repo, RepoWatcher, TreeId};
+use difftower_core::{Approvals, Backend, Change, Guard, Status, TreeId};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -22,7 +24,7 @@ use gpui_kit::*;
 
 use crate::{
     file_tree::{self, FileTree, Row},
-    terminal::TerminalView,
+    terminal::{TerminalCommand, TerminalView},
 };
 
 gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected]);
@@ -34,6 +36,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-3", ShowProtected, None),
     ]);
 }
+
+pub enum WorkspaceEvent {
+    /// The user wants to go back to the start screen.
+    Close,
+}
+
+impl EventEmitter<WorkspaceEvent> for Workspace {}
 
 /// Files larger than this are not previewed.
 const PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
@@ -55,7 +64,7 @@ struct Preview {
 /// One open repository: what changed against HEAD, and the review state the
 /// user builds up while reading it.
 pub struct Workspace {
-    repo: Repo,
+    backend: Arc<dyn Backend>,
     guard: Guard,
     /// The tree the shown changes were computed against.
     base: Option<TreeId>,
@@ -67,6 +76,8 @@ pub struct Workspace {
     /// Changed files that a protection rule covers and the user accepted.
     accepted: Vec<String>,
     approvals: Approvals,
+    /// Approvals are read from the backend once, then owned here.
+    approvals_loaded: bool,
     /// Hash of each file's patch when it was marked reviewed. A file whose
     /// patch changes again drops back to unreviewed.
     reviewed: HashMap<String, u64>,
@@ -85,24 +96,24 @@ pub struct Workspace {
     error: Option<SharedString>,
     refreshing: Option<Task<()>>,
     refresh_again: bool,
-    _watcher: Option<RepoWatcher>,
+    _watcher: Option<Box<dyn Any + Send>>,
     _watch_loop: Task<()>,
 }
 
 impl Workspace {
-    pub fn new(repo: Repo, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        backend: Arc<dyn Backend>,
+        shell: TerminalCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut error = None;
-        let guard = Guard::load(repo.root()).unwrap_or_else(|err| {
-            error = Some(format!("Invalid .difftower.toml: {err}").into());
-            Guard::empty(repo.root())
-        });
-        let approvals = Approvals::load(&repo);
         let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Unified));
 
         let (tx, rx) = async_channel::bounded::<()>(1);
-        let watcher = match difftower_core::watch(&repo, move || {
+        let watcher = match backend.watch(Box::new(move || {
             let _ = tx.try_send(());
-        }) {
+        })) {
             Ok(watcher) => Some(watcher),
             Err(err) => {
                 error = Some(format!("File watching unavailable: {err}").into());
@@ -117,7 +128,7 @@ impl Workspace {
             }
         });
 
-        let terminal = match TerminalView::new(repo.root(), window, cx) {
+        let terminal = match TerminalView::new(shell, window, cx) {
             Ok(view) => Some(view),
             Err(err) => {
                 error = Some(format!("Could not start a terminal: {err}").into());
@@ -130,14 +141,15 @@ impl Workspace {
         }
 
         let mut this = Self {
-            repo,
-            guard,
+            backend,
+            guard: Guard::empty(),
             base: None,
             changes: Vec::new(),
             changed_dirs: HashMap::new(),
             violations: Vec::new(),
             accepted: Vec::new(),
-            approvals,
+            approvals: Approvals::default(),
+            approvals_loaded: false,
             reviewed: HashMap::new(),
             tree: FileTree::default(),
             files_hash: 0,
@@ -167,25 +179,17 @@ impl Workspace {
             self.refresh_again = true;
             return;
         }
-        let repo = self.repo.clone();
+        let backend = self.backend.clone();
         self.refreshing = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let base = repo.head_tree()?;
-                    let changes = repo.changes(&base)?;
-                    let files = repo.files()?;
-                    anyhow::Ok((base, changes, files))
-                })
-                .await;
+            let result = cx.background_executor().spawn(async move { backend.status() }).await;
             this.update_in(cx, |this, window, cx| {
                 this.refreshing = None;
                 match result {
-                    Ok((base, changes, files)) => {
-                        this.base = Some(base);
-                        this.apply(changes.files, files, cx);
+                    Ok(status) => {
+                        this.error = None;
+                        this.apply(status, cx);
                     }
-                    Err(err) => this.error = Some(err.to_string().into()),
+                    Err(err) => this.error = Some(format!("{err:#}").into()),
                 }
                 if std::mem::take(&mut this.refresh_again) {
                     this.refresh(window, cx);
@@ -196,10 +200,19 @@ impl Workspace {
         }));
     }
 
-    fn apply(&mut self, changes: Vec<Change>, files: Vec<String>, cx: &mut Context<Self>) {
-        match Guard::load(self.repo.root()) {
+    fn apply(&mut self, status: Status, cx: &mut Context<Self>) {
+        let Status { base, changes, files, rules, rules_error, approvals } = status;
+        self.base = Some(base);
+        match Guard::new(rules) {
             Ok(guard) => self.guard = guard,
-            Err(err) => self.error = Some(format!("Invalid .difftower.toml: {err}").into()),
+            Err(err) => self.error = Some(format!("Invalid rule in .difftower.toml: {err}").into()),
+        }
+        if let Some(err) = rules_error {
+            self.error = Some(format!("Invalid .difftower.toml: {err}").into());
+        }
+        if !self.approvals_loaded {
+            self.approvals = Approvals::parse(&approvals);
+            self.approvals_loaded = true;
         }
 
         let patch: String = changes.iter().map(|c| c.patch.as_str()).collect();
@@ -225,8 +238,8 @@ impl Workspace {
                 *self.changed_dirs.entry(dir.to_owned()).or_default() += 1;
             }
         }
-        if let Err(err) = self.approvals.retain_current(&changes) {
-            self.error = Some(format!("Could not save approvals: {err}").into());
+        if self.approvals.retain_current(&changes) {
+            self.save_approvals(cx);
         }
         self.changes = changes;
         self.update_violations();
@@ -249,20 +262,46 @@ impl Workspace {
     fn accept(&mut self, paths: &[String], cx: &mut Context<Self>) {
         for path in paths {
             let Some(change) = self.change(path).cloned() else { continue };
-            if let Err(err) = self.approvals.approve(&change) {
-                self.error = Some(format!("Could not save approvals: {err}").into());
-            }
+            self.approvals.approve(&change);
         }
+        self.save_approvals(cx);
         self.update_violations();
         cx.notify();
     }
 
     fn revoke(&mut self, path: &str, cx: &mut Context<Self>) {
-        if let Err(err) = self.approvals.revoke(path) {
-            self.error = Some(format!("Could not save approvals: {err}").into());
+        if self.approvals.revoke(path) {
+            self.save_approvals(cx);
         }
         self.update_violations();
         cx.notify();
+    }
+
+    fn save_approvals(&self, cx: &mut Context<Self>) {
+        let text = self.approvals.to_text();
+        self.in_background("Could not save approvals", cx, move |backend| backend.save_approvals(&text));
+    }
+
+    /// Runs a backend operation off the UI thread, reporting a failure in
+    /// the status bar.
+    fn in_background(
+        &self,
+        what: &'static str,
+        cx: &mut Context<Self>,
+        job: impl FnOnce(&dyn Backend) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let backend = self.backend.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { job(&*backend) }).await;
+            if let Err(err) = result {
+                this.update(cx, |this, cx| {
+                    this.error = Some(format!("{what}: {err:#}").into());
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     fn rebuild_rows(&mut self) {
@@ -291,21 +330,36 @@ impl Workspace {
 
     fn revert(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
         let Some(base) = self.base.clone() else { return };
-        for path in paths {
-            let Some(change) = self.change(path).cloned() else { continue };
-            if let Err(err) = self.repo.revert(&base, &change) {
-                self.error = Some(format!("Could not revert {path}: {err}").into());
-            }
-        }
-        self.refresh(window, cx);
+        let changes: Vec<Change> = paths.iter().filter_map(|p| self.change(p).cloned()).collect();
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { changes.iter().try_for_each(|change| backend.revert(&base, change)) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if let Err(err) = result {
+                    this.error = Some(format!("Could not revert: {err:#}").into());
+                }
+                this.refresh(window, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Adds or removes a protection rule.
     fn toggle_rule(&mut self, rule: &str, cx: &mut Context<Self>) {
         let enabled = !self.guard.has_rule(rule);
-        if let Err(err) = self.guard.set_rule(rule, enabled) {
-            self.error = Some(format!("Could not save .difftower.toml: {err}").into());
+        match self.guard.with_rule(rule, enabled) {
+            Ok(guard) => self.guard = guard,
+            Err(err) => {
+                self.error = Some(format!("Invalid rule {rule}: {err}").into());
+                return;
+            }
         }
+        let rules = self.guard.patterns().to_vec();
+        self.in_background("Could not save .difftower.toml", cx, move |backend| backend.save_rules(&rules));
         self.update_violations();
         cx.notify();
     }
@@ -335,17 +389,15 @@ impl Workspace {
 
     fn open_preview(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.preview = Some(Preview { path: path.to_owned(), state: None, message: None });
-        let full_path = self.repo.root().join(path);
+        let backend = self.backend.clone();
         let path = path.to_owned();
+        let file = path.clone();
         self._preview_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let content = cx
-                .background_executor()
-                .spawn(async move { std::fs::read(full_path) })
-                .await;
+            let content = cx.background_executor().spawn(async move { backend.read_file(&file) }).await;
             this.update(cx, |this, cx| {
                 let Some(preview) = this.preview.as_mut().filter(|p| p.path == path) else { return };
                 match content {
-                    Err(err) => preview.message = Some(format!("Could not read the file: {err}").into()),
+                    Err(err) => preview.message = Some(format!("Could not read the file: {err:#}").into()),
                     Ok(bytes) if bytes.len() > PREVIEW_LIMIT => {
                         preview.message = Some("File too large to preview".into())
                     }
@@ -386,12 +438,8 @@ impl Workspace {
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let name = self
-            .repo
-            .root()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = self.backend.name();
+        let host = self.backend.host();
         let split = self.diff.read(cx).mode() == DiffMode::Split;
         h_flex()
             .h_10()
@@ -400,8 +448,28 @@ impl Workspace {
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().title_bar)
-            .child(Icon::new(Lucide::GitCompare).small().text_color(cx.theme().primary))
+            .child(
+                Button::new("home")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(Lucide::GitCompare).text_color(cx.theme().primary))
+                    .tooltip("Open another repository")
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(WorkspaceEvent::Close))),
+            )
             .child(div().font_semibold().child(name))
+            .when_some(host, |bar, host| {
+                bar.child(
+                    h_flex()
+                        .gap_1()
+                        .px_1p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(cx.theme().secondary)
+                        .text_color(cx.theme().secondary_foreground)
+                        .child(Icon::new(Lucide::Server).xsmall())
+                        .child(host),
+                )
+            })
             .child(
                 div()
                     .text_xs()
