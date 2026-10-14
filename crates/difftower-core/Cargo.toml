@@ -1,0 +1,17 @@
+[package]
+name = "difftower-core"
+description = "Baseline snapshots, diffs and file guards for Difftower"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+globset = "0.4.20"
+ignore = "0.4.33"
+notify-debouncer-mini = "0.7.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/difftower/difftower"
+
+[workspace.dependencies]
+difftower-core = { path = "crates/difftower-core" }
+gpui-kit = { version = "0.7.3", features = ["tree-sitter-rust", "tree-sitter-python", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-css", "tree-sitter-html", "tree-sitter-markdown", "tree-sitter-markdown-inline", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-ruby", "tree-sitter-php", "tree-sitter-lua", "tree-sitter-zig", "tree-sitter-swift", "tree-sitter-kotlin", "tree-sitter-elixir", "tree-sitter-csharp", "tree-sitter-scala", "tree-sitter-make", "tree-sitter-cmake", "tree-sitter-proto", "tree-sitter-graphql", "tree-sitter-svelte", "tree-sitter-diff"] }
+anyhow = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
