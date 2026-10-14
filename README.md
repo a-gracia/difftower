@@ -47,6 +47,15 @@ adds or removes the rule for it (`path` for a file, `path/**` for a folder).
 | `Ctrl+2` | Files |
 | `Ctrl+3` | Protected |
 
+## Several repositories at once
+
+Open a directory that is not a repository but holds some, such as
+`~/repos` with `api/`, `web/` and `worker/` inside, and Difftower shows
+all of them in one workspace, every path under its repository's name. No
+`git init` in the parent is needed. Each repository keeps its own
+`.difftower.toml` and approvals, so its protections also apply when it is
+opened alone. Repositories are found one level down.
+
 ## Remote repositories over SSH
 
 ```sh

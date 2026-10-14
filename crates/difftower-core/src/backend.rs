@@ -3,13 +3,12 @@ use std::{any::Any, path::Path};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::{Change, Repo, TreeId, guard};
+use crate::{Change, Repo, guard, multi::Multi};
 
 /// Everything the UI shows about a repository at one moment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
-    /// The tree the changes are measured against: HEAD.
-    pub base: TreeId,
+    /// Everything that differs from HEAD.
     pub changes: Vec<Change>,
     /// Every file in the working tree, ignored files excluded.
     pub files: Vec<String>,
@@ -29,14 +28,31 @@ pub trait Backend: Send + Sync {
     fn host(&self) -> Option<String>;
     /// Absolute path of the repository root on its host.
     fn root(&self) -> String;
+    /// How many repositories this backend shows: one, or each repository
+    /// directly inside a directory that is not one itself.
+    fn repo_count(&self) -> usize;
     fn status(&self) -> Result<Status>;
-    fn revert(&self, base: &TreeId, change: &Change) -> Result<()>;
+    /// Restores one changed file to its state in HEAD.
+    fn revert(&self, change: &Change) -> Result<()>;
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     fn save_rules(&self, rules: &[String]) -> Result<()>;
     fn save_approvals(&self, text: &str) -> Result<()>;
     /// Calls `on_change` whenever the working tree or HEAD changes, until
     /// the returned handle is dropped.
     fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>>;
+}
+
+/// Opens `path` as a repository, or, when it is a directory holding
+/// repositories, all of them together.
+pub fn open_path(path: &Path) -> Result<Box<dyn Backend>> {
+    match Repo::discover(path) {
+        Ok(repo) => Ok(Box::new(Local::new(repo))),
+        Err(err) if !path.is_dir() => Err(err),
+        Err(err) => match Multi::discover(path)? {
+            Some(multi) => Ok(Box::new(multi)),
+            None => Err(err.context("it contains no repositories either")),
+        },
+    }
 }
 
 /// A repository on this machine.
@@ -63,20 +79,16 @@ impl Backend for Local {
         self.repo.root().display().to_string()
     }
 
-    fn status(&self) -> Result<Status> {
-        let base = self.repo.head_tree()?;
-        let changes = self.repo.changes(&base)?.files;
-        let files = self.repo.files()?;
-        let (rules, rules_error) = match guard::load_rules(self.repo.root()) {
-            Ok(rules) => (rules, None),
-            Err(err) => (Vec::new(), Some(err.to_string())),
-        };
-        let approvals = self.repo.read_approvals()?;
-        Ok(Status { base, changes, files, rules, rules_error, approvals })
+    fn repo_count(&self) -> usize {
+        1
     }
 
-    fn revert(&self, base: &TreeId, change: &Change) -> Result<()> {
-        self.repo.revert(base, change)
+    fn status(&self) -> Result<Status> {
+        repo_status(&self.repo, "")
+    }
+
+    fn revert(&self, change: &Change) -> Result<()> {
+        self.repo.revert(&self.repo.head_tree()?, change)
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {
@@ -94,6 +106,19 @@ impl Backend for Local {
     fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>> {
         Ok(Box::new(crate::watch(&self.repo, on_change)?))
     }
+}
+
+/// The status of one repository, its paths placed under `prefix`.
+pub(crate) fn repo_status(repo: &Repo, prefix: &str) -> Result<Status> {
+    let base = repo.head_tree()?;
+    let changes = repo.changes_under(&base, prefix)?.files;
+    let files = repo.files()?;
+    let (rules, rules_error) = match guard::load_rules(repo.root()) {
+        Ok(rules) => (rules, None),
+        Err(err) => (Vec::new(), Some(err.to_string())),
+    };
+    let approvals = repo.read_approvals()?;
+    Ok(Status { changes, files, rules, rules_error, approvals })
 }
 
 pub(crate) fn dir_name(path: &str) -> String {

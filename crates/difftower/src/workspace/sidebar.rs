@@ -60,42 +60,29 @@ impl Workspace {
     }
 
     fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let reviewed = self.changes.iter().filter(|c| self.is_reviewed(c)).count();
-        let rows = self.changes.iter().enumerate().map(|(ix, change)| {
-            let path = change.path.clone();
-            let (dir, file) = match path.rsplit_once('/') {
-                Some((dir, file)) => (format!("{dir}/"), file.to_owned()),
-                None => (String::new(), path.clone()),
-            };
-            let (letter, color) = status_style(change.status, cx);
-            let is_reviewed = self.is_reviewed(change);
-            let selected = self.selected.as_deref() == Some(&path);
-            h_flex()
-                .id(("change", ix))
-                .px_3()
-                .py_1()
-                .gap_2()
-                .text_sm()
-                .cursor_pointer()
-                .when(selected, |el| el.bg(theme.list_active))
-                .hover(|el| el.bg(theme.list_hover))
-                .when(is_reviewed, |el| el.opacity(0.5))
-                .child(div().w_3().text_xs().font_semibold().text_color(color).child(letter))
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .child(div().flex_none().child(file))
-                        .child(div().ml_2().truncate().text_xs().text_color(theme.muted_foreground).child(dir)),
-                )
-                .when(self.violations.contains(&path), |el| {
-                    el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger))
-                })
-                .when(is_reviewed, |el| el.child(Icon::new(IconName::Check).xsmall().text_color(theme.success)))
-                .on_click(cx.listener(move |this, _, window, cx| this.open(&path, window, cx)))
-        });
+        let mut items: Vec<AnyElement> = Vec::new();
+        if self.backend.repo_count() > 1 {
+            // Changes arrive ordered by repository; group consecutive ones.
+            let mut start = 0;
+            while start < self.changes.len() {
+                let repo = repo_of(&self.changes[start].path);
+                let end = self.changes[start..]
+                    .iter()
+                    .position(|c| repo_of(&c.path) != repo)
+                    .map_or(self.changes.len(), |n| start + n);
+                items.push(self.render_repo_header(repo, start..end, cx));
+                if !self.collapsed_repos.contains(repo) {
+                    let prefix = format!("{repo}/");
+                    for ix in start..end {
+                        items.push(self.render_change(ix, &prefix, cx));
+                    }
+                }
+                start = end;
+            }
+        } else {
+            items.extend((0..self.changes.len()).map(|ix| self.render_change(ix, "", cx)));
+        }
 
         v_flex()
             .size_full()
@@ -104,10 +91,88 @@ impl Workspace {
                     .h_7()
                     .px_3()
                     .text_xs()
-                    .text_color(theme.muted_foreground)
+                    .text_color(cx.theme().muted_foreground)
                     .child(format!("{reviewed}/{} reviewed", self.changes.len())),
             )
-            .child(v_flex().id("changes").flex_1().overflow_y_scroll().children(rows))
+            .child(v_flex().id("changes").flex_1().overflow_y_scroll().children(items))
+    }
+
+    fn render_repo_header(&self, repo: &str, range: Range<usize>, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let changes = &self.changes[range.clone()];
+        let reviewed = changes.iter().filter(|c| self.is_reviewed(c)).count();
+        let violated = changes.iter().any(|c| self.violations.contains(&c.path));
+        let collapsed = self.collapsed_repos.contains(repo);
+        let toggle = repo.to_owned();
+        h_flex()
+            .id(SharedString::from(format!("repo-{repo}")))
+            .mt_1()
+            .px_2()
+            .py_1()
+            .gap_1p5()
+            .text_xs()
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.list_hover))
+            .child(
+                Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+                    .xsmall()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().truncate().font_semibold().child(repo.to_owned()))
+            .when(violated, |el| el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger)))
+            .child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child(format!("{reviewed}/{}", changes.len())),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.collapsed_repos.remove(&toggle) {
+                    this.collapsed_repos.insert(toggle.clone());
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// One changed file, its directory shown without `prefix`.
+    fn render_change(&self, ix: usize, prefix: &str, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let change = &self.changes[ix];
+        let path = change.path.clone();
+        let relative = path.strip_prefix(prefix).unwrap_or(&path);
+        let (dir, file) = match relative.rsplit_once('/') {
+            Some((dir, file)) => (format!("{dir}/"), file.to_owned()),
+            None => (String::new(), relative.to_owned()),
+        };
+        let (letter, color) = status_style(change.status, cx);
+        let is_reviewed = self.is_reviewed(change);
+        let selected = self.selected.as_deref() == Some(&path);
+        h_flex()
+            .id(("change", ix))
+            .pl(if prefix.is_empty() { px(12.) } else { px(26.) })
+            .pr_3()
+            .py_1()
+            .gap_2()
+            .text_sm()
+            .cursor_pointer()
+            .when(selected, |el| el.bg(theme.list_active))
+            .hover(|el| el.bg(theme.list_hover))
+            .when(is_reviewed, |el| el.opacity(0.5))
+            .child(div().w_3().text_xs().font_semibold().text_color(color).child(letter))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(div().flex_none().child(file))
+                    .child(div().ml_2().truncate().text_xs().text_color(theme.muted_foreground).child(dir)),
+            )
+            .when(self.violations.contains(&path), |el| {
+                el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger))
+            })
+            .when(is_reviewed, |el| el.child(Icon::new(IconName::Check).xsmall().text_color(theme.success)))
+            .on_click(cx.listener(move |this, _, window, cx| this.open(&path, window, cx)))
+            .into_any_element()
     }
 
     fn render_files(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -378,6 +443,11 @@ impl Workspace {
 
         v_flex().id("protected").size_full().overflow_y_scroll().children(rules).into_any_element()
     }
+}
+
+/// The repository a path belongs to in a multi-repository workspace.
+fn repo_of(path: &str) -> &str {
+    path.split('/').next().unwrap_or(path)
 }
 
 fn status_style(status: ChangeStatus, cx: &App) -> (&'static str, Hsla) {

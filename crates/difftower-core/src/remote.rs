@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
-    Backend, Change, Status, TreeId,
+    Backend, Change, Status,
     approvals::fnv,
     backend::dir_name,
     protocol::{Call, Message, PROTOCOL, Request},
@@ -97,6 +97,7 @@ struct Shared {
 pub struct Remote {
     target: SshTarget,
     root: String,
+    repo_count: usize,
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
     shared: Arc<Shared>,
@@ -139,8 +140,8 @@ impl Remote {
 
         let mut hello = String::new();
         stdout.read_line(&mut hello)?;
-        let root = match serde_json::from_str::<Message>(&hello) {
-            Ok(Message::Hello { protocol, root }) if protocol == PROTOCOL => root,
+        let (root, repo_count) = match serde_json::from_str::<Message>(&hello) {
+            Ok(Message::Hello { protocol, root, repo_count }) if protocol == PROTOCOL => (root, repo_count),
             Ok(Message::Hello { protocol, .. }) => {
                 bail!("the agent speaks protocol {protocol}, expected {PROTOCOL}")
             }
@@ -168,6 +169,7 @@ impl Remote {
         Ok(Self {
             target,
             root,
+            repo_count,
             stdin: Mutex::new(child.stdin.take().expect("piped")),
             child: Mutex::new(child),
             shared,
@@ -261,12 +263,16 @@ impl Backend for Remote {
         self.root.clone()
     }
 
+    fn repo_count(&self) -> usize {
+        self.repo_count
+    }
+
     fn status(&self) -> Result<Status> {
         self.call(Request::Status)
     }
 
-    fn revert(&self, base: &TreeId, change: &Change) -> Result<()> {
-        self.call(Request::Revert { base: base.clone(), change: change.clone() })
+    fn revert(&self, change: &Change) -> Result<()> {
+        self.call(Request::Revert { change: change.clone() })
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {

@@ -113,6 +113,12 @@ impl Repo {
 
     /// Everything in the working tree that differs from `base`.
     pub fn changes(&self, base: &TreeId) -> Result<Changes> {
+        self.changes_under(base, "")
+    }
+
+    /// Like [`Self::changes`], with every path, in the patches too, placed
+    /// under the directory `prefix` (no trailing slash; empty for none).
+    pub fn changes_under(&self, base: &TreeId, prefix: &str) -> Result<Changes> {
         let current = self.snapshot()?;
         if current == *base {
             return Ok(Changes::default());
@@ -120,9 +126,11 @@ impl Repo {
         let names = self.git(&[
             "diff-tree", "-r", "-z", "-M", "--name-status", "--no-ext-diff", &base.0, &current.0,
         ])?;
+        let dir = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+        let (src_prefix, dst_prefix) = (format!("--src-prefix=a/{dir}"), format!("--dst-prefix=b/{dir}"));
         let patch = self.git(&[
-            "diff-tree", "-r", "-M", "-p", "--no-color", "--no-ext-diff", "--full-index", &base.0,
-            &current.0,
+            "diff-tree", "-r", "-M", "-p", "--no-color", "--no-ext-diff", "--full-index", &src_prefix,
+            &dst_prefix, &base.0, &current.0,
         ])?;
         let mut files = parse_name_status(&names)?;
         let sections = split_patch(&patch);
@@ -130,7 +138,11 @@ impl Repo {
             bail!("git reported {} files but {} patch sections", files.len(), sections.len());
         }
         for (file, section) in files.iter_mut().zip(sections) {
-            file.patch = section.to_owned();
+            file.patch = prefix_rename_lines(section, &dir);
+            file.path.insert_str(0, &dir);
+            if let Some(old) = &mut file.old_path {
+                old.insert_str(0, &dir);
+            }
         }
         Ok(Changes { files })
     }
@@ -222,6 +234,33 @@ fn parse_name_status(out: &str) -> Result<Vec<Change>> {
         files.push(Change { status, path, old_path, patch: String::new() });
     }
     Ok(files)
+}
+
+/// Adds `dir` to the paths of `rename from`/`rename to` header lines, which
+/// git writes without the `--src-prefix`/`--dst-prefix` it uses elsewhere.
+fn prefix_rename_lines(section: &str, dir: &str) -> String {
+    if dir.is_empty() {
+        return section.to_owned();
+    }
+    let mut out = String::with_capacity(section.len() + 2 * dir.len());
+    let mut in_header = true;
+    for line in section.split_inclusive('\n') {
+        in_header &= !line.starts_with("@@");
+        let key = ["rename from ", "rename to ", "copy from ", "copy to "]
+            .into_iter()
+            .find(|key| in_header && line.starts_with(key));
+        match key {
+            Some(key) => {
+                let path = &line[key.len()..];
+                match path.strip_prefix('"') {
+                    Some(quoted) => out.push_str(&format!("{key}\"{dir}{quoted}")),
+                    None => out.push_str(&format!("{key}{dir}{path}")),
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// Splits a multi-file patch at each `diff --git` header.

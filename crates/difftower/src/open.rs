@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use difftower_core::{Backend, Local, Remote, Repo, SshTarget};
+use difftower_core::{Backend, Remote, SshTarget, open_path};
 
 use crate::terminal::TerminalCommand;
 
@@ -16,8 +16,9 @@ pub struct Opened {
     pub location: String,
 }
 
-/// Opens a local path or `[user@]host:path`. Blocks while connecting, so
-/// call it off the UI thread; `progress` receives each step.
+/// Opens a local path or `[user@]host:path`, either a repository or a
+/// directory of repositories. Blocks while connecting, so call it off the
+/// UI thread; `progress` receives each step.
 pub fn open(location: &str, progress: &dyn Fn(&str)) -> Result<Opened> {
     let location = location.trim();
     let path = expand_home(location);
@@ -25,12 +26,12 @@ pub fn open(location: &str, progress: &dyn Fn(&str)) -> Result<Opened> {
     let target = SshTarget::parse(location).filter(|_| !path.exists());
     match target {
         None => {
-            let repo = Repo::discover(&path)?;
-            let root = repo.root().to_path_buf();
+            let backend: Arc<dyn Backend> = open_path(&path)?.into();
+            let root = PathBuf::from(backend.root());
             Ok(Opened {
                 location: root.display().to_string(),
                 shell: TerminalCommand::Shell { cwd: root },
-                backend: Arc::new(Local::new(repo)),
+                backend,
             })
         }
         Some(target) => {

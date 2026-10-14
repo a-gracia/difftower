@@ -1,4 +1,5 @@
-//! `difftower-agent serve <path>`: serves one repository to Difftower over
+//! `difftower-agent serve <path>`: serves a repository, or a directory of
+//! repositories, to Difftower over
 //! stdin and stdout. Difftower installs and starts it on remote hosts
 //! through SSH; it exits when the connection closes.
 
@@ -11,7 +12,7 @@ use std::{
 use anyhow::{Result, bail};
 use base64::Engine as _;
 use difftower_core::{
-    Backend, Local, Repo,
+    Backend, open_path,
     protocol::{Call, Message, PROTOCOL, Request},
 };
 use serde_json::Value;
@@ -26,14 +27,14 @@ fn main() {
         }
     };
     let out = Arc::new(Mutex::new(std::io::stdout()));
-    let backend = match Repo::discover(&path) {
-        Ok(repo) => Local::new(repo),
+    let backend = match open_path(&path) {
+        Ok(backend) => backend,
         Err(err) => {
             send(&out, &Message::Fatal { error: format!("{err:#}") });
             std::process::exit(1);
         }
     };
-    send(&out, &Message::Hello { protocol: PROTOCOL, root: backend.root() });
+    send(&out, &Message::Hello { protocol: PROTOCOL, root: backend.root(), repo_count: backend.repo_count() });
 
     let changed_out = out.clone();
     let _watch = backend.watch(Box::new(move || send(&changed_out, &Message::Changed)));
@@ -47,15 +48,15 @@ fn main() {
                 continue;
             }
         };
-        let result = handle(&backend, call.request).map_err(|err| format!("{err:#}"));
+        let result = handle(&*backend, call.request).map_err(|err| format!("{err:#}"));
         send(&out, &Message::Reply { id: call.id, result });
     }
 }
 
-fn handle(backend: &Local, request: Request) -> Result<Value> {
+fn handle(backend: &dyn Backend, request: Request) -> Result<Value> {
     Ok(match request {
         Request::Status => serde_json::to_value(backend.status()?)?,
-        Request::Revert { base, change } => to_null(backend.revert(&base, &change)?),
+        Request::Revert { change } => to_null(backend.revert(&change)?),
         Request::ReadFile { path } => {
             if path.split('/').any(|part| part == "..") {
                 bail!("refusing to read outside the repository: {path}");

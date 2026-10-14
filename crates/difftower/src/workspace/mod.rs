@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use difftower_core::{Approvals, Backend, Change, Guard, Status, TreeId};
+use difftower_core::{Approvals, Backend, Change, Guard, Status};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -66,8 +66,6 @@ struct Preview {
 pub struct Workspace {
     backend: Arc<dyn Backend>,
     guard: Guard,
-    /// The tree the shown changes were computed against.
-    base: Option<TreeId>,
     changes: Vec<Change>,
     /// Number of changed files below each directory.
     changed_dirs: HashMap<String, usize>,
@@ -86,6 +84,8 @@ pub struct Workspace {
     expanded: HashSet<String>,
     rows: Rc<Vec<Row>>,
     tab: SidebarTab,
+    /// Repositories folded in the Changes tab of a multi-repository workspace.
+    collapsed_repos: HashSet<String>,
     diff: Entity<DiffState>,
     patch_hash: u64,
     preview: Option<Preview>,
@@ -143,7 +143,6 @@ impl Workspace {
         let mut this = Self {
             backend,
             guard: Guard::empty(),
-            base: None,
             changes: Vec::new(),
             changed_dirs: HashMap::new(),
             violations: Vec::new(),
@@ -156,6 +155,7 @@ impl Workspace {
             expanded: HashSet::new(),
             rows: Rc::default(),
             tab: SidebarTab::Changes,
+            collapsed_repos: HashSet::new(),
             diff,
             patch_hash: 0,
             preview: None,
@@ -201,8 +201,7 @@ impl Workspace {
     }
 
     fn apply(&mut self, status: Status, cx: &mut Context<Self>) {
-        let Status { base, changes, files, rules, rules_error, approvals } = status;
-        self.base = Some(base);
+        let Status { changes, files, rules, rules_error, approvals } = status;
         match Guard::new(rules) {
             Ok(guard) => self.guard = guard,
             Err(err) => self.error = Some(format!("Invalid rule in .difftower.toml: {err}").into()),
@@ -329,13 +328,12 @@ impl Workspace {
     }
 
     fn revert(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
-        let Some(base) = self.base.clone() else { return };
         let changes: Vec<Change> = paths.iter().filter_map(|p| self.change(p).cloned()).collect();
         let backend = self.backend.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { changes.iter().try_for_each(|change| backend.revert(&base, change)) })
+                .spawn(async move { changes.iter().try_for_each(|change| backend.revert(change)) })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 if let Err(err) = result {
@@ -440,6 +438,7 @@ impl Workspace {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.backend.name();
         let host = self.backend.host();
+        let repo_count = self.backend.repo_count();
         let split = self.diff.read(cx).mode() == DiffMode::Split;
         h_flex()
             .h_10()
@@ -457,6 +456,9 @@ impl Workspace {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(WorkspaceEvent::Close))),
             )
             .child(div().font_semibold().child(name))
+            .when(repo_count > 1, |bar| {
+                bar.child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{repo_count} repos")))
+            })
             .when_some(host, |bar, host| {
                 bar.child(
                     h_flex()

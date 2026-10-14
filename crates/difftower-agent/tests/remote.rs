@@ -80,7 +80,7 @@ fn installs_the_agent_and_serves_a_repository() {
     assert!(remote.read_file("../outside").is_err());
 
     let spec = status.changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
-    remote.revert(&status.base, spec).unwrap();
+    remote.revert(spec).unwrap();
     assert_eq!(fs::read_to_string(repo.join("tests/spec.rs")).unwrap(), "#[test] fn t() {}\n");
 
     // A second connection reuses the installed agent.
@@ -110,4 +110,24 @@ fn reports_a_missing_directory() {
     let target = SshTarget::parse("box:/nonexistent/repo").unwrap();
     let err = Remote::connect(target, &agent, &|_| {}).err().expect("connect fails");
     assert_eq!(err.to_string(), "/nonexistent/repo does not exist or is not a directory");
+}
+
+#[test]
+fn serves_a_directory_of_repositories() {
+    let _env = ENV.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    for name in ["api", "web"] {
+        let repo = home.join("repos").join(name);
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        fs::write(repo.join("README.md"), name).unwrap();
+    }
+    fake_ssh(tmp.path(), &home);
+    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
+    let remote = Remote::connect(SshTarget::parse("box:~/repos").unwrap(), &agent, &|_| {}).unwrap();
+    assert_eq!(remote.repo_count(), 2);
+    assert_eq!(remote.name(), "repos");
+    let paths: Vec<_> = remote.status().unwrap().changes.into_iter().map(|c| c.path).collect();
+    assert_eq!(paths, ["api/README.md", "web/README.md"]);
 }
