@@ -5,6 +5,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
 mod assets;
+mod file_tree;
 mod terminal;
 mod workspace;
 
@@ -25,6 +26,7 @@ fn main() -> anyhow::Result<()> {
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        workspace::bind_keys(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
         let options = WindowOptions {

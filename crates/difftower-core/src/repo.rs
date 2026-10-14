@@ -5,10 +5,6 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 
-/// Ref that keeps the session baseline reachable, so `git gc` never prunes it
-/// and a session survives restarts.
-const BASELINE_REF: &str = "refs/difftower/baseline";
-
 /// A git tree object id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TreeId(pub String);
@@ -101,26 +97,6 @@ impl Repo {
         Ok(TreeId(self.git(&["write-tree"])?.trim_end().to_owned()))
     }
 
-    pub fn baseline(&self) -> Result<Option<TreeId>> {
-        match self.git(&["rev-parse", "--verify", "--quiet", BASELINE_REF]) {
-            Ok(id) => Ok(Some(TreeId(id.trim_end().to_owned()))),
-            Err(_) => Ok(None),
-        }
-    }
-
-    /// Makes the current working tree the point that changes are measured from.
-    pub fn reset_baseline(&self) -> Result<TreeId> {
-        let tree = self.snapshot()?;
-        self.git(&["update-ref", BASELINE_REF, &tree.0])?;
-        Ok(tree)
-    }
-
-    /// Forgets the session baseline.
-    pub fn clear_baseline(&self) -> Result<()> {
-        self.git(&["update-ref", "-d", BASELINE_REF])?;
-        Ok(())
-    }
-
     /// The tree of the current commit, or the empty tree before the first commit.
     pub fn head_tree(&self) -> Result<TreeId> {
         let id = match self.git(&["rev-parse", "--verify", "--quiet", "HEAD^{tree}"]) {
@@ -153,6 +129,13 @@ impl Repo {
             file.patch = section.to_owned();
         }
         Ok(Changes { files })
+    }
+
+    /// Every file in the working tree as of the last snapshot, ignored files
+    /// excluded, sorted by path.
+    pub fn files(&self) -> Result<Vec<String>> {
+        let out = self.git(&["ls-files", "-z", "--cached"])?;
+        Ok(out.split('\0').filter(|f| !f.is_empty()).map(str::to_owned).collect())
     }
 
     /// Restores one changed file to its baseline state on disk.

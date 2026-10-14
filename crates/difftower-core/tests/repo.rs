@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use difftower_core::{ChangeStatus, Guard, Repo};
+use difftower_core::{Approvals, ChangeStatus, Guard, Repo, dir_rule, file_rule};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git").current_dir(dir).args(args).status().unwrap().success();
@@ -20,16 +20,16 @@ fn fixture() -> (tempfile::TempDir, Repo) {
     fs::write(root.join("tests/spec.rs"), "assert!(true);\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-qm", "init"]);
-    // An uncommitted edit before the session starts is part of the baseline.
+    // An uncommitted edit made before the snapshot.
     fs::write(root.join("b.txt"), "keep\nlocal\n").unwrap();
     let repo = Repo::discover(root).unwrap();
     (dir, repo)
 }
 
 #[test]
-fn no_changes_right_after_baseline() {
+fn no_changes_against_a_fresh_snapshot() {
     let (_dir, repo) = fixture();
-    let base = repo.reset_baseline().unwrap();
+    let base = repo.snapshot().unwrap();
     assert!(repo.changes(&base).unwrap().files.is_empty());
 }
 
@@ -37,7 +37,7 @@ fn no_changes_right_after_baseline() {
 fn reports_modified_added_deleted_and_skips_ignored() {
     let (dir, repo) = fixture();
     let root = dir.path();
-    let base = repo.reset_baseline().unwrap();
+    let base = repo.snapshot().unwrap();
     fs::write(root.join("a.txt"), "one\nTWO\n").unwrap();
     fs::write(root.join("new.txt"), "hello\n").unwrap();
     fs::remove_file(root.join("tests/spec.rs")).unwrap();
@@ -56,14 +56,14 @@ fn reports_modified_added_deleted_and_skips_ignored() {
     );
     assert!(changes.files[0].patch.starts_with("diff --git a/a.txt b/a.txt"));
     assert!(changes.files[0].patch.contains("+TWO"));
-    // The user's pre-session edit to b.txt is not reported.
+    // The edit to b.txt made before the snapshot is not reported.
     assert!(!changes.patch().contains("local"));
 }
 
 #[test]
 fn commits_by_the_agent_do_not_hide_changes() {
     let (dir, repo) = fixture();
-    let base = repo.reset_baseline().unwrap();
+    let base = repo.snapshot().unwrap();
     fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
     git(dir.path(), &["commit", "-qam", "agent"]);
     assert_eq!(repo.changes(&base).unwrap().files.len(), 1);
@@ -73,7 +73,7 @@ fn commits_by_the_agent_do_not_hide_changes() {
 fn revert_restores_each_kind_of_change() {
     let (dir, repo) = fixture();
     let root = dir.path();
-    let base = repo.reset_baseline().unwrap();
+    let base = repo.snapshot().unwrap();
     fs::write(root.join("a.txt"), "garbage\n").unwrap();
     fs::write(root.join("new.txt"), "hello\n").unwrap();
     fs::remove_file(root.join("tests/spec.rs")).unwrap();
@@ -84,16 +84,6 @@ fn revert_restores_each_kind_of_change() {
     }
     assert!(repo.changes(&base).unwrap().files.is_empty());
     assert_eq!(fs::read_to_string(root.join("b.txt")).unwrap(), "keep\nlocal\n");
-}
-
-#[test]
-fn baseline_survives_reopening_until_cleared() {
-    let (dir, repo) = fixture();
-    let base = repo.reset_baseline().unwrap();
-    let reopened = Repo::discover(dir.path().join("tests")).unwrap();
-    assert_eq!(reopened.baseline().unwrap(), Some(base));
-    reopened.clear_baseline().unwrap();
-    assert_eq!(repo.baseline().unwrap(), None);
 }
 
 #[test]
@@ -122,16 +112,53 @@ fn head_of_a_repo_without_commits_is_the_empty_tree() {
 }
 
 #[test]
-fn guard_pins_and_globs() {
+fn guard_rules_for_files_and_dirs() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join(".difftower.toml"), "[guard]\nprotect = [\"tests/**\"]\n").unwrap();
     let mut guard = Guard::load(dir.path()).unwrap();
     assert!(guard.is_protected("tests/spec.rs"));
+    assert!(guard.is_protected("tests/deep/spec.rs"));
     assert!(!guard.is_protected("src/main.rs"));
 
-    guard.set_pinned("src/[weird].rs", true).unwrap();
-    let guard = Guard::load(dir.path()).unwrap();
+    guard.set_rule(&file_rule("src/[weird].rs"), true).unwrap();
+    guard.set_rule(&dir_rule("db"), true).unwrap();
+    let mut guard = Guard::load(dir.path()).unwrap();
     assert!(guard.is_protected("src/[weird].rs"));
     assert!(!guard.is_protected("src/w.rs"));
-    assert!(guard.is_protected("tests/x.rs"));
+    assert!(guard.is_protected("db/migrations/001.sql"));
+    assert!(guard.has_rule(&dir_rule("db")));
+    assert_eq!(guard.rules_for("db/x.sql"), [2]);
+
+    guard.set_rule("tests/**", false).unwrap();
+    assert!(!Guard::load(dir.path()).unwrap().is_protected("tests/spec.rs"));
+}
+
+#[test]
+fn lists_files_without_ignored_ones() {
+    let (dir, repo) = fixture();
+    fs::create_dir(dir.path().join("target")).unwrap();
+    fs::write(dir.path().join("target/out"), "x").unwrap();
+    fs::write(dir.path().join("new.txt"), "x").unwrap();
+    repo.snapshot().unwrap();
+    assert_eq!(repo.files().unwrap(), [".gitignore", "a.txt", "b.txt", "new.txt", "tests/spec.rs"]);
+}
+
+#[test]
+fn approvals_cover_one_exact_patch_and_persist() {
+    let (dir, repo) = fixture();
+    let head = repo.head_tree().unwrap();
+    fs::write(dir.path().join("tests/spec.rs"), "assert!(false);\n").unwrap();
+    let change = repo.changes(&head).unwrap().files.into_iter().find(|c| c.path == "tests/spec.rs").unwrap();
+
+    let mut approvals = Approvals::load(&repo);
+    approvals.approve(&change).unwrap();
+    assert!(Approvals::load(&repo).is_approved(&change));
+
+    // A further edit by the agent is not covered by the earlier approval.
+    fs::write(dir.path().join("tests/spec.rs"), "assert!(1 == 2);\n").unwrap();
+    let changes = repo.changes(&head).unwrap().files;
+    let edited = changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
+    assert!(!approvals.is_approved(edited));
+    approvals.retain_current(&changes).unwrap();
+    assert!(!Approvals::load(&repo).is_approved(&change));
 }

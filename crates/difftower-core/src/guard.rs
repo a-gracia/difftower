@@ -59,22 +59,38 @@ impl Guard {
         self.set.is_match(path)
     }
 
-    /// Whether `path` is protected by itself rather than by a wider glob.
-    pub fn is_pinned(&self, path: &str) -> bool {
-        self.patterns.iter().any(|p| p == path)
+    /// Indices into [`Self::patterns`] of the rules that protect `path`.
+    pub fn rules_for(&self, path: &str) -> Vec<usize> {
+        self.set.matches(path)
     }
 
-    /// Pins or unpins one exact path and saves the configuration.
-    pub fn set_pinned(&mut self, path: &str, pinned: bool) -> Result<()> {
+    pub fn has_rule(&self, pattern: &str) -> bool {
+        self.patterns.iter().any(|p| p == pattern)
+    }
+
+    /// Adds or removes one rule and saves the configuration.
+    pub fn set_rule(&mut self, pattern: &str, enabled: bool) -> Result<()> {
         let mut patterns = self.patterns.clone();
-        patterns.retain(|p| p != path);
-        if pinned {
-            patterns.push(globset::escape(path));
+        patterns.retain(|p| p != pattern);
+        if enabled {
+            patterns.push(pattern.to_owned());
         }
         *self = Self::new(self.path.clone(), patterns)?;
         self.save()
     }
+}
 
+/// The rule that protects exactly one file.
+pub fn file_rule(path: &str) -> String {
+    globset::escape(path)
+}
+
+/// The rule that protects everything inside a directory.
+pub fn dir_rule(dir: &str) -> String {
+    format!("{}/**", globset::escape(dir))
+}
+
+impl Guard {
     fn save(&self) -> Result<()> {
         // Keep any other sections a user wrote by hand.
         let mut doc: toml::Table = match std::fs::read_to_string(&self.path) {

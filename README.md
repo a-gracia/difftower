@@ -11,15 +11,19 @@ agents must not touch.
 
 - **Live diff of your repo.** Everything that differs from HEAD, untracked
   files included, updated as the agent writes.
-- **Sessions.** Start a session to accumulate every change from that moment
-  on, even after the agent commits. A session survives restarts until you
-  end it.
 - **Review like a pull request.** Unified or split view, syntax highlighting,
   mark files as reviewed. A reviewed file that changes again goes back to
   unreviewed.
-- **Protected files.** Pin files such as tests or migrations. If an agent
-  modifies one, Difftower alerts you and reverts it in one click.
-- **Revert any file** to HEAD, or to the start of the session.
+- **File tree.** Browse every file in the repository, see which folders
+  contain changes, and open unchanged files read-only.
+- **Protected files and folders.** Protect tests, migrations or whole
+  folders from the tree. The status bar turns red the moment an agent
+  touches one, with a single count however many files it hit, and the
+  Protected tab lists each rule with what changed under it. Revert one
+  file, one rule or everything in a click — or accept the change when it
+  was intended. An acceptance covers that exact change: if the agent edits
+  the file again, the alert comes back.
+- **Revert any file** to HEAD.
 - **Integrated terminal** to run your agent right next to its diff.
 
 ### Protected files
@@ -32,13 +36,22 @@ team can commit and share them:
 protect = ["tests/**", "migrations/**", "Cargo.lock"]
 ```
 
-The shield button on each file header adds or removes that exact path.
+The shield next to a file or folder in the tree, or on a diff header,
+adds or removes the rule for it (`path` for a file, `path/**` for a folder).
+
+## Keyboard
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+1` | Changes |
+| `Ctrl+2` | Files |
+| `Ctrl+3` | Protected |
 
 ## How it works
 
 The working tree, untracked files included, is written as a git tree
 through a private index file (`.git/difftower/index`) and diffed against
-HEAD or the session's tree, kept alive by `refs/difftower/baseline`.
+HEAD.
 Your own index, branches and stash are never touched.
 
 ## Building
@@ -52,7 +65,7 @@ cargo build --release
 
 ## Roadmap
 
-- [x] Live diff against HEAD or a session, review state, protected files
+- [x] Live diff against HEAD, review state, protected files
 - [x] Integrated terminal to run agents side by side
 - [ ] Line comments sent back to the agent as prompts
 - [ ] Agent hooks that block edits to protected files before they happen
