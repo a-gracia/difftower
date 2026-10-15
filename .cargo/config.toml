@@ -1,0 +1,7 @@
+[target.x86_64-unknown-linux-gnu]
+linker = ".cargo/link-lld.sh"
+
+# Day to day: optimized but incremental, seconds to rebuild instead of minutes.
+# `cargo dt [path | user@host:/path]`
+[alias]
+dt = "run --profile profiling -p difftower --"

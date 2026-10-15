@@ -120,11 +120,15 @@ File icons come from [Material Icon Theme](https://github.com/material-extension
 Requires Rust 1.90+ and git. Linux only for now.
 
 ```sh
-cargo build --release
-./target/release/difftower                    # start screen with recent repositories
-./target/release/difftower path/to/repo       # open a local repository
-./target/release/difftower user@host:/repo    # open one over SSH
+cargo dt                     # start screen with recent repositories
+cargo dt path/to/repo        # open a local repository
+cargo dt user@host:/repo     # open one over SSH
 ```
+
+`cargo dt` builds the `profiling` profile: as fast as release at runtime,
+but incremental, so a change rebuilds in seconds. `cargo build --release`
+adds LTO for the shipped binary and takes minutes after any change; use it
+only to package (`./target/release/difftower`).
 
 Without arguments Difftower shows a start screen: type a path or
 `user@host:/path`, choose a folder, or reopen a recent repository. The icon

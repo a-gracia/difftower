@@ -19,6 +19,16 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
+# Optimized like release, minutes faster to build: for measuring and day to
+# day use. Release keeps LTO and one codegen unit for the shipped binary.
+[profile.profiling]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
+debug = "line-tables-only"
+
 # A copy of gpui-component whose split diff scrolls each side on its own;
 # see vendor/gpui-component/DIFFTOWER.md.
 [patch.crates-io]
