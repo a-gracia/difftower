@@ -11,7 +11,9 @@ agents must not touch.
 
 - **Live diff of your repo.** Everything that differs from HEAD, untracked
   files included, updated as the agent writes.
-- **Review like a pull request.** Unified or split view, syntax highlighting,
+- **Review like a pull request.** The selected file is shown in full with
+  its changes, next to a ruler marking where they are. Unified or split
+  view (each side scrolls sideways on its own), syntax highlighting,
   mark files as reviewed. A reviewed file that changes again goes back to
   unreviewed.
 - **File tree.** Browse every file in the repository, see which folders

@@ -1,10 +1,10 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    diff::Diff,
+    diff::{Diff, OverviewKind},
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -113,11 +113,8 @@ impl Workspace {
         // Actions sit right after the file name, not at the end of the
         // header: the header is as wide as the longest line, so its end can
         // be scrolled out of view.
-        // Split columns scroll sideways together in the diff component, so
-        // the right side of a long line ends up off screen; wrapping keeps
-        // each side within its half.
-        Diff::new(&self.diff)
-            .soft_wrap(self.settings.soft_wrap || self.settings.split)
+        let diff = Diff::new(&self.diff)
+            .soft_wrap(self.settings.soft_wrap)
             .render_header_title_suffix(move |file, _, cx| {
                 let path = file.path().to_string();
                 let state = states.get(&path);
@@ -181,6 +178,84 @@ impl Workspace {
                             }),
                     )
             })
+            .into_any_element();
+        h_flex()
+            .size_full()
+            .child(div().flex_1().min_w_0().h_full().child(diff))
+            .child(self.render_overview(cx))
             .into_any_element()
+    }
+
+    /// A strip beside the diff with a mark where each change is and the part
+    /// in view; clicking or dragging on it scrolls there.
+    fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let (added, removed, modified) = (theme.success, theme.danger, theme.blue);
+        let in_view = theme.foreground.opacity(0.12);
+        let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
+        let state = self.diff.clone();
+        let scroll_to = {
+            let (bounds, state) = (bounds.clone(), state.clone());
+            move |y: Pixels, cx: &mut App| {
+                let bounds = bounds.get();
+                if bounds.size.height > px(0.) {
+                    let fraction = (y - bounds.origin.y) / bounds.size.height;
+                    state.update(cx, |state, cx| state.scroll_to_fraction(fraction, cx));
+                }
+            }
+        };
+        let drag_to = scroll_to.clone();
+        div()
+            .id("overview")
+            .flex_none()
+            .w(px(12.))
+            .h_full()
+            .border_l_1()
+            .border_color(theme.border)
+            .cursor_pointer()
+            .child(
+                canvas(
+                    {
+                        let bounds = bounds.clone();
+                        move |area, _, _| bounds.set(area)
+                    },
+                    move |area, (), window, cx| {
+                        let overview = state.read(cx).overview();
+                        let height = area.size.height;
+                        let at = |fraction: f32| area.origin.y + height * fraction;
+                        let visible = &overview.visible;
+                        if visible.end > visible.start {
+                            let top = at(visible.start);
+                            let box_height = (height * (visible.end - visible.start)).max(px(6.));
+                            window.paint_quad(fill(
+                                Bounds::new(point(area.origin.x, top), size(area.size.width, box_height)),
+                                in_view,
+                            ));
+                        }
+                        for mark in &overview.marks {
+                            let color = match mark.kind {
+                                OverviewKind::Added => added,
+                                OverviewKind::Removed => removed,
+                                OverviewKind::Modified => modified,
+                            };
+                            let mark_height = (height * (mark.end - mark.start)).max(px(2.));
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(area.origin.x + px(3.), at(mark.start)),
+                                    size(area.size.width - px(6.), mark_height),
+                                ),
+                                color,
+                            ));
+                        }
+                    },
+                )
+                .size_full(),
+            )
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| scroll_to(event.position.y, cx))
+            .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    drag_to(event.position.y, cx);
+                }
+            })
     }
 }

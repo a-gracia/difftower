@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::Change;
 
 /// Bumped whenever a message changes shape.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Call {
@@ -21,6 +21,8 @@ pub enum Request {
     Revert { change: Change },
     /// Answered with the file's bytes in standard base64.
     ReadFile { path: String },
+    /// Answered with the patch as a string.
+    FileDiff { change: Change },
     SaveRules { rules: Vec<String> },
     SaveApprovals { text: String },
 }

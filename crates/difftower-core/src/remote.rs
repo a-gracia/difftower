@@ -368,6 +368,10 @@ impl Backend for Remote {
         Ok(base64::engine::general_purpose::STANDARD.decode(encoded)?)
     }
 
+    fn file_diff(&self, change: &Change) -> Result<String> {
+        self.call(Request::FileDiff { change: change.clone() })
+    }
+
     fn save_rules(&self, rules: &[String]) -> Result<()> {
         self.call(Request::SaveRules { rules: rules.to_vec() })
     }

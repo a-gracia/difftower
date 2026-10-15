@@ -253,6 +253,24 @@ impl Repo {
         Ok(Changes { files })
     }
 
+    /// One changed file's patch with the whole file as context, so it can be
+    /// read in full, its paths placed under `prefix` like
+    /// [`Self::changes_under`]. `change` uses this repository's own paths.
+    pub fn file_patch(&self, base: &TreeId, change: &Change, prefix: &str) -> Result<String> {
+        let current = self.snapshot()?;
+        let dir = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+        let (src_prefix, dst_prefix) = (format!("--src-prefix=a/{dir}"), format!("--dst-prefix=b/{dir}"));
+        let mut args = vec![
+            "--literal-pathspecs", "diff-tree", "-r", "-M", "-p", "--no-color", "--no-ext-diff", "--full-index",
+            // Context larger than any file: every line of it.
+            "--unified=100000000", &src_prefix, &dst_prefix, &base.0, &current.0, "--",
+        ];
+        args.extend(change.old_path.iter().map(String::as_str));
+        args.push(&change.path);
+        let patch = self.git(&args)?;
+        Ok(prefix_rename_lines(&patch, &dir))
+    }
+
     /// Accepted changes to protected files, as stored by [`crate::Approvals::to_text`].
     pub fn read_approvals(&self) -> Result<String> {
         match std::fs::read_to_string(self.approvals_path()) {

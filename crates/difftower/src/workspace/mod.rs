@@ -1,4 +1,5 @@
 mod diff_view;
+mod main_panel;
 mod sidebar;
 
 use std::{
@@ -97,6 +98,8 @@ pub struct Workspace {
     files_hash: u64,
     /// Protected and total files below each directory, for its shield.
     protection: HashMap<String, (usize, usize)>,
+    /// The files each rule protects, by rule index, for the Protected tab.
+    covered: Vec<Vec<String>>,
     expanded: HashSet<String>,
     rows: Rc<Vec<Row>>,
     tab: SidebarTab,
@@ -110,11 +113,13 @@ pub struct Workspace {
     dragging: Option<Divider>,
     /// The changed file in the diff and the hash of its patch, when one is.
     shown: Option<(String, u64)>,
+    _diff_task: Option<Task<()>>,
     /// Lines added and removed across all changes.
     totals: (usize, usize),
     preview: Option<Preview>,
     _preview_task: Option<Task<()>>,
     terminal: Option<Entity<TerminalView>>,
+    main_panel: Option<Entity<main_panel::MainPanel>>,
     selected: Option<String>,
     error: Option<SharedString>,
     refreshing: Option<Task<()>>,
@@ -133,7 +138,8 @@ impl Workspace {
         let mut error = None;
         let settings = Settings::load();
         let mode = if settings.split { DiffMode::Split } else { DiffMode::Unified };
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
+        // The whole file is shown, so unchanged runs stay unfolded.
+        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode).with_context_lines(None));
 
         let (tx, rx) = async_channel::bounded::<()>(1);
         let watcher = match backend.watch(Box::new(move || {
@@ -179,6 +185,7 @@ impl Workspace {
             files: Vec::new(),
             files_hash: 0,
             protection: HashMap::new(),
+            covered: Vec::new(),
             expanded: HashSet::new(),
             rows: Rc::default(),
             tab: SidebarTab::Changes,
@@ -188,10 +195,12 @@ impl Workspace {
             settings,
             dragging: None,
             shown: None,
+            _diff_task: None,
             totals: (0, 0),
             preview: None,
             _preview_task: None,
             terminal,
+            main_panel: None,
             selected: None,
             error,
             refreshing: None,
@@ -199,8 +208,32 @@ impl Workspace {
             _watcher: watcher,
             _watch_loop: watch_loop,
         };
+        let workspace = cx.entity();
+        let diff = this.diff.clone();
+        this.main_panel = Some(cx.new(|cx| main_panel::MainPanel::new(&workspace, &diff, cx)));
         this.refresh(window, cx);
         this
+    }
+
+    /// Everything the center panel shows, so it renders only when this changes.
+    fn main_key(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.shown.hash(&mut hasher);
+        self.changes.is_empty().hash(&mut hasher);
+        (self.settings.soft_wrap, self.settings.split).hash(&mut hasher);
+        if let Some(preview) = &self.preview {
+            preview.path.hash(&mut hasher);
+            preview.state.as_ref().map(|state| state.entity_id()).hash(&mut hasher);
+            preview.message.hash(&mut hasher);
+        }
+        // What the diff header of the shown file says about it.
+        if let Some(change) = self.shown.as_ref().and_then(|(path, _)| self.change(path)) {
+            self.is_reviewed(change).hash(&mut hasher);
+            self.guard.is_protected(&change.path).hash(&mut hasher);
+            self.violations.contains(&change.path).hash(&mut hasher);
+            self.accepted.contains(&change.path).hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// Recomputes the changes in the background, coalescing bursts.
@@ -272,8 +305,13 @@ impl Workspace {
     /// Recounts protected files per directory; call when files or rules change.
     fn update_protection(&mut self) {
         self.protection.clear();
+        self.covered = vec![Vec::new(); self.guard.patterns().len()];
         for file in &self.files {
-            let protected = usize::from(self.guard.is_protected(file));
+            let rule = self.guard.rule_for(file);
+            if let Some(ix) = rule {
+                self.covered[ix].push(file.clone());
+            }
+            let protected = usize::from(rule.is_some());
             for dir in file_tree::ancestors(file) {
                 let (count, total) = self.protection.entry(dir.to_owned()).or_default();
                 *count += protected;
@@ -419,24 +457,50 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Puts the selected file's current patch in the diff, or nothing. Leaves
-    /// the diff, and its scroll position, alone when that patch is unchanged.
+    /// Puts the whole selected file, with its changes, in the diff, or
+    /// nothing. Leaves the diff alone when its patch is unchanged, and keeps
+    /// the scroll position when the same file changed again.
     fn show_selected(&mut self, cx: &mut Context<Self>) {
-        let change = self.selected.as_deref().and_then(|path| self.change(path)).filter(|_| self.preview.is_none());
-        let target = change.map(|c| (c.path.clone(), hash(&c.patch)));
+        let change = self
+            .selected
+            .as_deref()
+            .and_then(|path| self.change(path))
+            .filter(|_| self.preview.is_none())
+            .cloned();
+        let target = change.as_ref().map(|c| (c.path.clone(), hash(&c.patch)));
         if target == self.shown {
             return;
         }
-        let files = match change.map(|c| DiffFile::parse(&c.patch)) {
-            Some(Ok(files)) => files,
-            Some(Err(err)) => {
-                self.error = Some(format!("Could not parse the diff: {}", err.message()).into());
-                Vec::new()
-            }
-            None => Vec::new(),
+        let same_file = matches!((&target, &self.shown), (Some((a, _)), Some((b, _))) if a == b);
+        self.shown = target.clone();
+        let Some(change) = change else {
+            self._diff_task = None;
+            self.diff.update(cx, |diff, cx| diff.set_files([], cx));
+            return;
         };
-        self.shown = target;
-        self.diff.update(cx, |diff, cx| diff.set_files(files, cx));
+        if !same_file {
+            // Nothing from the previous file while this one loads.
+            self.diff.update(cx, |diff, cx| diff.set_files([], cx));
+        }
+        let backend = self.backend.clone();
+        self._diff_task = Some(cx.spawn(async move |this, cx| {
+            let request = change.clone();
+            let full = cx.background_executor().spawn(async move { backend.file_diff(&request) }).await;
+            this.update(cx, |this, cx| {
+                if this.shown != target {
+                    return;
+                }
+                // The hunks alone still beat nothing.
+                let patch = full.as_deref().unwrap_or(&change.patch);
+                match DiffFile::parse(patch) {
+                    Ok(files) if same_file => this.diff.update(cx, |diff, cx| diff.replace_files(files, cx)),
+                    Ok(files) => this.diff.update(cx, |diff, cx| diff.set_files(files, cx)),
+                    Err(err) => this.error = Some(format!("Could not parse the diff: {}", err.message()).into()),
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// Shows a changed file in the diff, or any other file in a preview.
@@ -470,7 +534,13 @@ impl Workspace {
                     Ok(bytes) => {
                         let text = String::from_utf8_lossy(&bytes);
                         let file = DiffFile::unchanged(path.clone(), &text);
-                        preview.state = Some(cx.new(|cx| DiffState::new([file], cx)));
+                        let state = cx.new(|cx| DiffState::new([file], cx));
+                        // Its highlighting arrives later and must show.
+                        if let Some(panel) = &this.main_panel {
+                            let panel = panel.clone();
+                            cx.observe(&state, move |_, _, cx| panel.update(cx, |panel, cx| panel.invalidate(cx))).detach();
+                        }
+                        preview.state = Some(state);
                     }
                 }
                 cx.notify();
@@ -636,8 +706,8 @@ impl Workspace {
                     .small()
                     .ghost()
                     .icon(Icon::new(Lucide::TextWrap))
-                    .selected(self.settings.soft_wrap || self.settings.split)
-                    .tooltip(if self.settings.split { "Split view always wraps long lines" } else { "Wrap long lines (Alt+Z)" })
+                    .selected(self.settings.soft_wrap)
+                    .tooltip("Wrap long lines (Alt+Z)")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
             )
             .child(
@@ -668,7 +738,12 @@ impl Workspace {
                     .child(Icon::new(IconName::SquareTerminal).xsmall())
                     .child(div().min_w_0().truncate().child(title)),
             )
-            .child(div().flex_1().min_h_0().child(terminal))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(AnyView::from(terminal).cached(StyleRefinement::default().size_full())),
+            )
     }
 
     /// The bottom bar: protection status at a glance, colored by state.
@@ -784,7 +859,13 @@ impl Render for Workspace {
                     .w_full()
                     .child(div().flex_none().w(px(sidebar_width)).h_full().child(self.render_sidebar(cx)))
                     .child(self.render_divider(Divider::Sidebar, cx))
-                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(self.render_main(cx)))
+                    .child(
+                        div().flex_1().min_w_0().h_full().overflow_hidden().children(
+                            self.main_panel
+                                .clone()
+                                .map(|panel| AnyView::from(panel).cached(StyleRefinement::default().size_full())),
+                        ),
+                    )
                     .when_some(terminal, |row, terminal| {
                         row.child(self.render_divider(Divider::Terminal, cx)).child(
                             div().flex_none().w(px(terminal_width)).h_full().child(self.render_terminal(terminal, cx)),

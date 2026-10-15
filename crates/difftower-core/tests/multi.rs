@@ -58,6 +58,10 @@ fn shows_every_repository_under_its_name() {
     assert_eq!(status.rules, ["api/src/**"]);
 
     assert_eq!(backend.read_file("web/index.html").unwrap(), b"<p>bye</p>\n");
+    let full = backend.file_diff(&status.changes[0]).unwrap();
+    assert!(full.contains("rename from api/old.rs\nrename to api/new.rs"), "{full}");
+    let full = backend.file_diff(&status.changes[1]).unwrap();
+    assert!(full.starts_with("diff --git a/api/src/main.rs b/api/src/main.rs"), "{full}");
     for change in &status.changes {
         backend.revert(change).unwrap();
     }

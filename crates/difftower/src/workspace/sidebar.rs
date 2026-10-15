@@ -351,7 +351,7 @@ impl Workspace {
                 .into_any_element();
         }
 
-        let covered: Vec<&String> = self.files.iter().filter(|f| self.guard.rule_for(f) == Some(ix)).collect();
+        let covered: Vec<&String> = self.covered.get(ix).map(|files| files.iter().collect()).unwrap_or_default();
         let modified: Vec<String> =
             self.violations.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
         let accepted: Vec<String> =

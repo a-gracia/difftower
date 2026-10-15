@@ -119,6 +119,17 @@ impl Backend for Multi {
         repo.revert(&repo.head_tree()?, &change)
     }
 
+    fn file_diff(&self, change: &Change) -> Result<String> {
+        let (repo, path) = self.locate(&change.path)?;
+        let name = self.repos.iter().find(|(_, r)| std::ptr::eq(r, repo)).map(|(n, _)| n.clone()).expect("located");
+        let old_path = match &change.old_path {
+            Some(old) => Some(self.locate(old)?.1.to_owned()),
+            None => None,
+        };
+        let change = Change { path: path.to_owned(), old_path, ..change.clone() };
+        repo.file_patch(&repo.head_tree()?, &change, &name)
+    }
+
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         let (repo, path) = self.locate(path)?;
         Ok(std::fs::read(repo.root().join(path))?)

@@ -201,3 +201,29 @@ fn approvals_cover_one_exact_patch_and_persist() {
     assert!(approvals.retain_current(&changes));
     assert!(!approvals.is_approved(&change));
 }
+
+#[test]
+fn a_file_patch_has_the_whole_file_as_context() {
+    let (dir, repo) = fixture();
+    let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+    fs::write(dir.path().join("long.txt"), &body).unwrap();
+    git(dir.path(), &["add", "long.txt"]);
+    git(dir.path(), &["commit", "-qm", "long"]);
+    fs::write(dir.path().join("long.txt"), body.replace("line 25\n", "line twenty-five\n")).unwrap();
+    fs::rename(dir.path().join("a.txt"), dir.path().join("renamed.txt")).unwrap();
+
+    let head = repo.head_tree().unwrap();
+    let changes = repo.changes(&head).unwrap().files;
+    let long = changes.iter().find(|c| c.path == "long.txt").unwrap();
+    assert!(!long.patch.contains(" line 1\n"), "the status patch keeps 3 lines of context");
+
+    let full = repo.file_patch(&head, long, "").unwrap();
+    assert!(full.contains("@@ -1,50 +1,50 @@"), "{full}");
+    assert!(full.contains(" line 1\n") && full.contains(" line 50\n"));
+    assert!(full.contains("-line 25\n+line twenty-five\n"));
+    assert_eq!(full.matches("diff --git").count(), 1, "only the requested file");
+
+    let renamed = changes.iter().find(|c| c.path == "renamed.txt").unwrap();
+    let full = repo.file_patch(&head, renamed, "").unwrap();
+    assert!(full.contains("rename from a.txt\nrename to renamed.txt"), "{full}");
+}

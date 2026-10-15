@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor/gpui-component"]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,3 +18,8 @@ anyhow = "1"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# A copy of gpui-component whose split diff scrolls each side on its own;
+# see vendor/gpui-component/DIFFTOWER.md.
+[patch.crates-io]
+gpui-component = { path = "vendor/gpui-component" }

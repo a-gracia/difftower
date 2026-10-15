@@ -82,6 +82,8 @@ fn installs_the_agent_and_serves_a_repository() {
     assert_eq!(status.rules, ["tests/**"]);
     assert_eq!(status.approvals, "0000000000000001\ttests/spec.rs\n");
     assert_eq!(remote.read_file("tests/spec.rs").unwrap(), b"// gone\n");
+    let spec = status.changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
+    assert!(remote.file_diff(spec).unwrap().contains("+// gone"));
     assert!(remote.read_file("../outside").is_err());
 
     let spec = status.changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();

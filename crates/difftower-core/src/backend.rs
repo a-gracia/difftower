@@ -35,6 +35,8 @@ pub trait Backend: Send + Sync {
     /// Restores one changed file to its state in HEAD.
     fn revert(&self, change: &Change) -> Result<()>;
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
+    /// One changed file's patch with the whole file as context.
+    fn file_diff(&self, change: &Change) -> Result<String>;
     fn save_rules(&self, rules: &[String]) -> Result<()>;
     fn save_approvals(&self, text: &str) -> Result<()>;
     /// Calls `on_change` whenever the working tree or HEAD changes, until
@@ -93,6 +95,10 @@ impl Backend for Local {
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         Ok(std::fs::read(self.repo.root().join(path))?)
+    }
+
+    fn file_diff(&self, change: &Change) -> Result<String> {
+        self.repo.file_patch(&self.repo.head_tree()?, change, "")
     }
 
     fn save_rules(&self, rules: &[String]) -> Result<()> {

@@ -64,6 +64,7 @@ fn handle(backend: &dyn Backend, request: Request) -> Result<Value> {
             let bytes = backend.read_file(&path)?;
             Value::String(base64::engine::general_purpose::STANDARD.encode(bytes))
         }
+        Request::FileDiff { change } => Value::String(backend.file_diff(&change)?),
         Request::SaveRules { rules } => to_null(backend.save_rules(&rules)?),
         Request::SaveApprovals { text } => to_null(backend.save_approvals(&text)?),
     })
