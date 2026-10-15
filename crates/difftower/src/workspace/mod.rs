@@ -823,6 +823,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::profile::frame_start();
         // The side panels keep the width the user gave them; the diff takes
         // the rest. In a window too narrow for all three, the terminal and
         // then the file list give way without changing the saved widths.
@@ -873,6 +874,8 @@ impl Render for Workspace {
                     }),
             )
             .child(self.render_status_bar(cx))
+            // Painted last: the end of the frame for DIFFTOWER_PROFILE.
+            .child(canvas(|_, _, _| {}, |_, _, _, _| crate::profile::frame_end()).absolute().size_0())
     }
 }
 

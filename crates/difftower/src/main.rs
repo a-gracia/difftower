@@ -6,6 +6,7 @@ mod file_icons;
 mod file_tree;
 mod home;
 mod open;
+mod profile;
 mod recent;
 mod settings;
 mod terminal;

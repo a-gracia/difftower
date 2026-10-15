@@ -3,6 +3,7 @@
 //! [`DiffState`] for all of them in the owner, and build [`Diff`] during rendering.
 mod conflict;
 mod document;
+mod gutter;
 mod parser;
 #[cfg(test)]
 mod parser_tests;
@@ -444,12 +445,50 @@ impl RenderOnce for Diff {
     }
 }
 
+// Difftower: test-only probes for perf_tests; compiled out of the app.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static ROW_NANOS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        static OFF: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+    /// Turns parts off for the following frames, comma separated.
+    pub fn set_off(parts: &str) {
+        OFF.with_borrow_mut(|off| *off = Some(parts.to_owned()));
+    }
+    /// Whether [`set_off`] turned `part` off.
+    pub fn off(part: &str) -> bool {
+        OFF.with_borrow(|off| off.as_deref().is_some_and(|v| v.split(',').any(|p| p == part)))
+    }
+    pub fn take_row_nanos() -> u64 {
+        ROW_NANOS.swap(0, Ordering::Relaxed)
+    }
+}
+
+/// Whether a test turned `part` off; always false in the app.
+#[inline(always)]
+fn ablated(_part: &str) -> bool {
+    #[cfg(test)]
+    return probe::off(_part);
+    #[cfg(not(test))]
+    false
+}
+
 fn render_diff(
     props: Diff,
     state: &mut DiffState,
     window: &mut Window,
     cx: &mut Context<DiffState>,
 ) -> AnyElement {
+    #[cfg(test)]
+    let props = {
+        let mut props = props;
+        if probe::off("syntax") { props.syntax_highlight = false; }
+        if probe::off("gutter") { props.line_number = false; }
+        if probe::off("indicator") { props.change_indicator = DiffChangeIndicator::None; }
+        props
+    };
     state.set_window(window.window_handle().window_id());
     state.ensure_presentation(cx);
     let rem = window.rem_size();
@@ -567,12 +606,17 @@ fn render_diff(
                 .track_scroll(&horizontal)
                 .child(
                     list(scrollbar.clone(), move |ix, window, cx| {
+                        #[cfg(test)]
+                        let started = std::time::Instant::now();
                         let row = &rows[ix];
-                        div()
+                        let element = div()
                             .id(("diff-file", row.file()))
                             .w_full()
                             .child(render_row(row, code.clone(), window, cx))
-                            .into_any_element()
+                            .into_any_element();
+                        #[cfg(test)]
+                        probe::ROW_NANOS.fetch_add(started.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                        element
                     })
                     .w(content_width)
                     .h_full(),
@@ -1342,80 +1386,6 @@ fn render_notice(file: &DiffFile, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn render_gutter(
-    file: usize,
-    side: DiffSide,
-    ix: Option<usize>,
-    code: &CodePresentation,
-    cx: &App,
-) -> AnyElement {
-    let hover = matches!(
-        code.hover_highlight,
-        DiffHoverHighlight::LineNumber | DiffHoverHighlight::Both
-    );
-    div()
-        .id(if side == DiffSide::Original {
-            "old-gutter"
-        } else {
-            "new-gutter"
-        })
-        .flex_shrink_0()
-        .w(code.gutter_width)
-        .pr_1()
-        .when(hover, |this| {
-            this.hover(|this| this.bg(cx.theme().list_hover))
-        })
-        .when_some(ix, |this, ix| {
-            let position = code.position(file, side, ix);
-            let down = code.state.clone();
-            let moved = code.state.clone();
-            let dragged = position.clone();
-            // A plain hit target: line numbers need no button chrome or state.
-            this.child(
-                div()
-                    .id(("line", ix))
-                    .test_support()
-                    .w_full()
-                    .h(code.row_height)
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .text_size(code.font_size)
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|this| this.text_color(cx.theme().foreground))
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label(
-                        t!(
-                            "Diff.SelectLine",
-                            side = side_label(side),
-                            line = position.line()
-                        )
-                        .to_string(),
-                    )
-                    .child(position.line().to_string())
-                    .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                        down.update(cx, |state, cx| {
-                            state.begin_line_selection(
-                                position.clone(),
-                                event.modifiers.shift,
-                                window,
-                                cx,
-                            )
-                        })
-                    })
-                    .on_mouse_move(move |event, _, cx| {
-                        if event.pressed_button == Some(MouseButton::Left) {
-                            moved.update(cx, |state, cx| {
-                                state.drag_line_selection(dragged.clone(), cx)
-                            })
-                        }
-                    }),
-            )
-        })
-        .into_any_element()
-}
-
 fn side_label(side: DiffSide) -> std::borrow::Cow<'static, str> {
     if side == DiffSide::Original {
         t!("Diff.Original")
@@ -1702,6 +1672,10 @@ fn code_line(
             }
         })
         .children(ranges.into_iter().enumerate().map(|(chunk_ix, range)| {
+            #[cfg(test)]
+            if probe::off("codetext") {
+                return div().child(source_line.chunk_text(&range)).into_any_element();
+            }
             CodeText::new(
                 ("code", chunk_ix).into(),
                 document.clone(),
@@ -1713,30 +1687,43 @@ fn code_line(
                 code.selection.clone(),
                 code.geometry.clone(),
             )
+            .into_any_element()
         }));
     let gutters_width = if code.line_number {
         code.gutter_width * gutters.iter().flatten().count() as f32
     } else {
         px(0.)
     };
+    // Difftower: numbers and sign as one fixed-size element (see gutter.rs).
     let indicator = match code.change_indicator {
-        DiffChangeIndicator::Signs => div()
-            .w_4()
-            .flex_shrink_0()
-            .text_color(if changed {
-                status
-            } else {
-                cx.theme().muted_foreground
-            })
-            .child(match (changed && conflict_part.is_none(), side) {
+        DiffChangeIndicator::Signs => gutter::Indicator::Sign {
+            text: match (changed && conflict_part.is_none(), side) {
                 (false, _) => " ",
                 (true, DiffSide::Original) => "−",
                 (true, DiffSide::Modified) => "+",
-            }),
-        DiffChangeIndicator::Bars => div().w_4().h_full().flex_shrink_0().when(changed, |this| {
-            this.child(div().w(px(3.)).h_full().bg(status))
-        }),
-        DiffChangeIndicator::None => div().w_2().flex_shrink_0(),
+            },
+            color: if changed { status } else { cx.theme().muted_foreground },
+        },
+        DiffChangeIndicator::Bars => gutter::Indicator::Bar(changed.then_some(status)),
+        DiffChangeIndicator::None => gutter::Indicator::Space,
+    };
+    let line_gutter = gutter::LineGutter {
+        slots: if code.line_number {
+            gutters
+                .iter()
+                .flatten()
+                .map(|(side, ix)| ix.map(|ix| code.position(file, *side, ix)))
+                .collect()
+        } else {
+            Vec::new()
+        },
+        slot_width: code.gutter_width,
+        indicator,
+        row_height: code.row_height,
+        font_size: code.font_size,
+        font: gpui::Font { family: cx.theme().mono_font_family.clone(), ..Default::default() },
+        number_color: cx.theme().muted_foreground,
+        state: code.state.clone(),
     };
     let hover_line = matches!(
         code.hover_highlight,
@@ -1775,15 +1762,7 @@ fn code_line(
                 handler(hovered.then_some(&position), window, cx)
             })
         })
-        .when(code.line_number, |this| {
-            this.children(
-                gutters
-                    .into_iter()
-                    .flatten()
-                    .map(|(side, ix)| render_gutter(file, side, ix, &code, cx)),
-            )
-        })
-        .child(indicator)
+        .child(line_gutter)
         .child(split_clip(
             code.split_offsets.map(|offsets| offsets[side as usize]),
             div()
@@ -1796,24 +1775,26 @@ fn code_line(
                         this.flex_shrink_0()
                     }
                 })
-                .role(gpui::accesskit::Role::Label)
-                .aria_label(source_line.text().clone())
-                .aria_description(
-                    t!(
-                        if changed {
-                            if side == DiffSide::Original {
-                                "Diff.RemovedLine"
-                            } else {
-                                "Diff.AddedLine"
-                            }
-                        } else {
-                            "Diff.SourceLine"
-                        },
-                        side = side_label(text_side),
-                        line = position.line()
-                    )
-                    .to_string(),
-                )
+                .when(!ablated("aria"), |this| {
+                    this.role(gpui::accesskit::Role::Label)
+                        .aria_label(source_line.text().clone())
+                        .aria_description(
+                            t!(
+                                if changed {
+                                    if side == DiffSide::Original {
+                                        "Diff.RemovedLine"
+                                    } else {
+                                        "Diff.AddedLine"
+                                    }
+                                } else {
+                                    "Diff.SourceLine"
+                                },
+                                side = side_label(text_side),
+                                line = position.line()
+                            )
+                            .to_string(),
+                        )
+                })
                 .when_some(code.on_line_click.clone(), |this, handler| {
                     let position = position.clone();
                     this.on_click(move |event, window, cx| {
