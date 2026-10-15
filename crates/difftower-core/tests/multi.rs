@@ -37,7 +37,7 @@ fn fixture() -> tempfile::TempDir {
 fn shows_every_repository_under_its_name() {
     let root = fixture();
     let backend = open_path(root.path()).unwrap();
-    assert_eq!(backend.repo_count(), 2);
+    assert_eq!(backend.repos(), ["api", "web"]);
 
     fs::write(root.path().join("api/src/main.rs"), "fn main() { todo!() }\n").unwrap();
     fs::rename(root.path().join("api/old.rs"), root.path().join("api/new.rs")).unwrap();
@@ -100,4 +100,81 @@ fn a_directory_without_repositories_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let err = open_path(dir.path()).err().unwrap();
     assert!(format!("{err:#}").contains("contains no repositories"), "{err:#}");
+}
+
+/// `root` is a repository too, holding `api`, which it ignores, and `web`,
+/// which it neither ignores nor tracks.
+fn nested_fixture() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    repo(root.path(), &[("AGENTS.md", "be nice\n"), ("library/book.md", "# book\n"), (".gitignore", "/api/\n")]);
+    repo(&root.path().join("api"), &[("src/main.rs", "fn main() {}\n")]);
+    repo(&root.path().join("web"), &[("index.html", "<p>hi</p>\n")]);
+    root
+}
+
+#[test]
+fn a_repository_holding_repositories_shows_them_all() {
+    let root = nested_fixture();
+    let backend = open_path(root.path()).unwrap();
+    assert_eq!(backend.repos(), ["", "api", "web"]);
+
+    fs::write(root.path().join("AGENTS.md"), "be kind\n").unwrap();
+    fs::write(root.path().join("library/book.md"), "# a book\n").unwrap();
+    fs::write(root.path().join("api/src/main.rs"), "fn main() { todo!() }\n").unwrap();
+    fs::write(root.path().join("web/index.html"), "<p>bye</p>\n").unwrap();
+
+    let status = backend.status().unwrap();
+    let paths: Vec<_> = status.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["AGENTS.md", "library/book.md", "api/src/main.rs", "web/index.html"]);
+    assert!(status.changes[2].patch.contains("+++ b/api/src/main.rs"), "{}", status.changes[2].patch);
+
+    for file in ["AGENTS.md", "library/book.md", "api/src/main.rs", "web/index.html"] {
+        assert!(status.files.contains(&file.to_owned()), "{file} missing from {:?}", status.files);
+    }
+    // The inner repositories' own files, never the outer one's view of them.
+    assert!(!status.files.iter().any(|f| f == "web" || f.starts_with("web/.git")), "{:?}", status.files);
+
+    assert_eq!(backend.read_file("api/src/main.rs").unwrap(), b"fn main() { todo!() }\n");
+    assert_eq!(backend.read_file("AGENTS.md").unwrap(), b"be kind\n");
+    let full = backend.file_diff(&status.changes[0]).unwrap();
+    assert!(full.starts_with("diff --git a/AGENTS.md b/AGENTS.md"), "{full}");
+    let full = backend.file_diff(&status.changes[3]).unwrap();
+    assert!(full.starts_with("diff --git a/web/index.html b/web/index.html"), "{full}");
+
+    for change in &status.changes {
+        backend.revert(change).unwrap();
+    }
+    assert!(backend.status().unwrap().changes.is_empty());
+}
+
+#[test]
+fn a_repository_holding_repositories_keeps_rules_in_each() {
+    let root = nested_fixture();
+    let backend = open_path(root.path()).unwrap();
+
+    backend.save_rules(&["library/**".into(), "api/src/**".into(), "!api/src/main.rs".into()]).unwrap();
+    let outer = fs::read_to_string(root.path().join(".difftower.toml")).unwrap();
+    assert!(outer.contains("\"library/**\"") && !outer.contains("api"), "{outer}");
+    let api = fs::read_to_string(root.path().join("api/.difftower.toml")).unwrap();
+    assert!(api.contains("\"src/**\"") && api.contains("\"!src/main.rs\""), "{api}");
+    let mut rules = backend.status().unwrap().rules;
+    rules.sort();
+    assert_eq!(rules, ["!api/src/main.rs", "api/src/**", "library/**"]);
+
+    backend.save_approvals("00000000000000aa\tAGENTS.md\n00000000000000bb\tweb/index.html\n").unwrap();
+    assert_eq!(fs::read_to_string(root.path().join(".git/difftower/approvals")).unwrap(), "00000000000000aa\tAGENTS.md\n");
+    assert_eq!(
+        fs::read_to_string(root.path().join("web/.git/difftower/approvals")).unwrap(),
+        "00000000000000bb\tindex.html\n"
+    );
+}
+
+#[test]
+fn a_repository_without_repositories_inside_stays_one() {
+    let root = tempfile::tempdir().unwrap();
+    repo(root.path(), &[("a.txt", "a\n")]);
+    fs::create_dir(root.path().join("docs")).unwrap();
+    assert_eq!(open_path(root.path()).unwrap().repos(), [""]);
+    // Opening a subdirectory still opens the whole repository.
+    assert_eq!(open_path(&root.path().join("docs")).unwrap().root(), root.path().canonicalize().unwrap().display().to_string());
 }

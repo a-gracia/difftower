@@ -1,7 +1,7 @@
-//! Several repositories side by side in a directory that is not a
-//! repository itself, shown as one. Every path gets its repository's
-//! directory name as a prefix; each repository keeps its own rules and
-//! approvals, so nothing is written to the parent directory.
+//! Several repositories shown as one: the repositories side by side in a
+//! directory, and the directory itself when it is a repository too. Every
+//! path gets its repository's directory name as a prefix (none for the outer
+//! repository); each repository keeps its own rules and approvals.
 
 use std::{
     any::Any,
@@ -18,13 +18,14 @@ use crate::{
 
 pub struct Multi {
     root: PathBuf,
-    /// Each repository with its directory name, sorted by name.
+    /// Each repository with its directory name, sorted by name; an empty
+    /// name, first, is `root` itself.
     repos: Vec<(String, Repo)>,
 }
 
 impl Multi {
-    /// The repositories directly inside `root`, or `None` if there are none.
-    pub fn discover(root: &Path) -> Result<Option<Self>> {
+    /// The repositories directly inside `root`, with their directory names.
+    pub fn inner_repos(root: &Path) -> Result<Vec<(String, Repo)>> {
         let mut repos = Vec::new();
         for entry in std::fs::read_dir(root)? {
             let entry = entry?;
@@ -35,20 +36,51 @@ impl Multi {
             let name = entry.file_name().to_string_lossy().into_owned();
             repos.push((name, Repo::discover(&path)?));
         }
-        if repos.is_empty() {
-            return Ok(None);
-        }
-        repos.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(Some(Self { root: root.to_path_buf(), repos }))
+        Ok(repos)
+    }
+
+    /// `inner`, from [`Self::inner_repos`], together with `outer`, the
+    /// repository at `root` itself, if any.
+    pub fn new(root: &Path, outer: Option<Repo>, mut inner: Vec<(String, Repo)>) -> Self {
+        inner.extend(outer.map(|repo| (String::new(), repo)));
+        inner.sort_by(|a, b| a.0.cmp(&b.0));
+        Self { root: root.to_path_buf(), repos: inner }
     }
 
     /// The repository holding `path`, and `path` relative to it.
     fn locate<'a>(&self, path: &'a str) -> Result<(&Repo, &'a str)> {
-        self.repos
-            .iter()
-            .find_map(|(name, repo)| Some((repo, path.strip_prefix(name.as_str())?.strip_prefix('/')?)))
+        Ok(self.locate_ix(path)?.1)
+    }
+
+    fn locate_ix<'a>(&self, path: &'a str) -> Result<(usize, (&Repo, &'a str))> {
+        let inner = self.repos.iter().enumerate().find_map(|(ix, (name, repo))| {
+            let rest = path.strip_prefix(name.as_str())?.strip_prefix('/')?;
+            (!name.is_empty()).then_some((ix, (repo, rest)))
+        });
+        inner
+            .or_else(|| self.outer().map(|repo| (0, (repo, path))))
             .ok_or_else(|| anyhow!("{path} is not inside any of the repositories"))
     }
+
+    /// The repository at the root itself, if it is one.
+    fn outer(&self) -> Option<&Repo> {
+        self.repos.first().filter(|(name, _)| name.is_empty()).map(|(_, repo)| repo)
+    }
+
+    /// Whether `path`, of the outer repository, is one of the inner ones or
+    /// inside it: the outer repository may track them as submodules or list
+    /// them as untracked directories.
+    fn is_inner(&self, path: &str) -> bool {
+        let path = path.trim_end_matches('/');
+        self.repos.iter().any(|(name, _)| {
+            !name.is_empty() && path.strip_prefix(name.as_str()).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    }
+}
+
+/// `path` under the directory `name`, or as is for the outer repository.
+fn join(name: &str, path: &str) -> String {
+    if name.is_empty() { path.to_owned() } else { format!("{name}/{path}") }
 }
 
 impl Backend for Multi {
@@ -64,8 +96,8 @@ impl Backend for Multi {
         self.root.display().to_string()
     }
 
-    fn repo_count(&self) -> usize {
-        self.repos.len()
+    fn repos(&self) -> Vec<String> {
+        self.repos.iter().map(|(name, _)| name.clone()).collect()
     }
 
     fn status(&self) -> Result<Status> {
@@ -87,19 +119,22 @@ impl Backend for Multi {
         let mut errors = Vec::new();
         for ((name, _), repo_status) in self.repos.iter().zip(statuses) {
             let repo_status = repo_status?;
-            status.changes.extend(repo_status.changes);
-            status.files.extend(repo_status.files.iter().map(|f| format!("{name}/{f}")));
+            let outer = name.is_empty();
+            status.changes.extend(repo_status.changes.into_iter().filter(|c| !(outer && self.is_inner(&c.path))));
+            status
+                .files
+                .extend(repo_status.files.iter().filter(|f| !(outer && self.is_inner(f))).map(|f| join(name, f)));
             let dir = globset::escape(name);
             status.rules.extend(repo_status.rules.iter().map(|rule| match rule.strip_prefix('!') {
-                Some(glob) => format!("!{dir}/{glob}"),
-                None => format!("{dir}/{rule}"),
+                Some(glob) => format!("!{}", join(&dir, glob)),
+                None => join(&dir, rule),
             }));
             if let Some(err) = repo_status.rules_error {
                 errors.push(format!("{name}: {err}"));
             }
             for line in repo_status.approvals.lines() {
                 if let Some((hash, path)) = line.split_once('\t') {
-                    status.approvals.push_str(&format!("{hash}\t{name}/{path}\n"));
+                    status.approvals.push_str(&format!("{hash}\t{}\n", join(name, path)));
                 }
             }
         }
@@ -120,14 +155,14 @@ impl Backend for Multi {
     }
 
     fn file_diff(&self, change: &Change) -> Result<String> {
-        let (repo, path) = self.locate(&change.path)?;
-        let name = self.repos.iter().find(|(_, r)| std::ptr::eq(r, repo)).map(|(n, _)| n.clone()).expect("located");
+        let (ix, (repo, path)) = self.locate_ix(&change.path)?;
+        let name = &self.repos[ix].0;
         let old_path = match &change.old_path {
             Some(old) => Some(self.locate(old)?.1.to_owned()),
             None => None,
         };
         let change = Change { path: path.to_owned(), old_path, ..change.clone() };
-        repo.file_patch(&repo.head_tree()?, &change, &name)
+        repo.file_patch(&repo.head_tree()?, &change, name)
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {
@@ -143,13 +178,14 @@ impl Backend for Multi {
                 Some(glob) => ("!", glob),
                 None => ("", rule.as_str()),
             };
-            let ix = self
-                .repos
-                .iter()
-                .position(|(name, _)| glob.starts_with(&format!("{}/", globset::escape(name))))
+            let inner = self.repos.iter().enumerate().find_map(|(ix, (name, _))| {
+                let rest = glob.strip_prefix(&format!("{}/", globset::escape(name)))?;
+                (!name.is_empty()).then_some((ix, rest))
+            });
+            let (ix, glob) = inner
+                .or_else(|| self.outer().map(|_| (0, glob)))
                 .with_context(|| format!("the rule {rule} must be inside one of the repositories"))?;
-            let dir_len = globset::escape(&self.repos[ix].0).len() + 1;
-            by_repo[ix].push(format!("{bang}{}", &glob[dir_len..]));
+            by_repo[ix].push(format!("{bang}{glob}"));
         }
         for ((_, repo), rules) in self.repos.iter().zip(by_repo) {
             if guard::load_rules(repo.root()).ok().as_ref() != Some(&rules) {
@@ -164,8 +200,7 @@ impl Backend for Multi {
         let mut by_repo = vec![String::new(); self.repos.len()];
         for line in text.lines() {
             let Some((hash, path)) = line.split_once('\t') else { continue };
-            let (repo, path) = self.locate(path)?;
-            let ix = self.repos.iter().position(|(_, r)| std::ptr::eq(r, repo)).expect("located repo");
+            let (ix, (_, path)) = self.locate_ix(path)?;
             by_repo[ix].push_str(&format!("{hash}\t{path}\n"));
         }
         for ((_, repo), text) in self.repos.iter().zip(by_repo) {

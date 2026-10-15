@@ -70,18 +70,19 @@ impl Workspace {
     fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let reviewed = self.changes.iter().filter(|c| self.is_reviewed(c)).count();
         let mut items: Vec<AnyElement> = Vec::new();
-        if self.backend.repo_count() > 1 {
+        let repos = self.backend.repos();
+        if repos.len() > 1 {
             // Changes arrive ordered by repository; group consecutive ones.
             let mut start = 0;
             while start < self.changes.len() {
-                let repo = repo_of(&self.changes[start].path);
+                let repo = repo_of(&self.changes[start].path, &repos);
                 let end = self.changes[start..]
                     .iter()
-                    .position(|c| repo_of(&c.path) != repo)
+                    .position(|c| repo_of(&c.path, &repos) != repo)
                     .map_or(self.changes.len(), |n| start + n);
                 items.push(self.render_repo_header(repo, start..end, cx));
                 if !self.collapsed_repos.contains(repo) {
-                    let prefix = format!("{repo}/");
+                    let prefix = if repo.is_empty() { String::new() } else { format!("{repo}/") };
                     for ix in start..end {
                         items.push(self.render_change(ix, &prefix, cx));
                     }
@@ -126,7 +127,12 @@ impl Workspace {
                     .small()
                     .text_color(theme.muted_foreground),
             )
-            .child(div().flex_1().min_w_0().truncate().font_semibold().child(repo.to_owned()))
+            .child(div().flex_1().min_w_0().truncate().font_semibold().child(if repo.is_empty() {
+                // The opened directory, a repository itself.
+                self.backend.name()
+            } else {
+                repo.to_owned()
+            }))
             .when(violated, |el| el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger)))
             .child(
                 div()
@@ -527,8 +533,14 @@ enum Protection {
 }
 
 /// The repository a path belongs to in a multi-repository workspace.
-fn repo_of(path: &str) -> &str {
-    path.split('/').next().unwrap_or(path)
+/// The directory of the repository among `repos` that holds `path`; empty
+/// for the opened directory itself.
+fn repo_of<'a>(path: &str, repos: &'a [String]) -> &'a str {
+    repos
+        .iter()
+        .filter(|repo| !repo.is_empty())
+        .find(|repo| path.strip_prefix(repo.as_str()).is_some_and(|rest| rest.starts_with('/')))
+        .map_or("", String::as_str)
 }
 
 fn status_style(status: ChangeStatus, cx: &App) -> (&'static str, Hsla) {

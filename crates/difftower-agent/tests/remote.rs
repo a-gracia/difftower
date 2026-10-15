@@ -133,7 +133,7 @@ fn serves_a_directory_of_repositories() {
     fake_ssh(tmp.path(), &home);
     let agent = agent();
     let remote = Remote::connect(SshTarget::parse("box:~/repos").unwrap(), agent, &|_| {}).unwrap();
-    assert_eq!(remote.repo_count(), 2);
+    assert_eq!(remote.repos(), ["api", "web"]);
     assert_eq!(remote.name(), "repos");
     let paths: Vec<_> = remote.status().unwrap().changes.into_iter().map(|c| c.path).collect();
     assert_eq!(paths, ["api/README.md", "web/README.md"]);

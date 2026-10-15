@@ -28,9 +28,10 @@ pub trait Backend: Send + Sync {
     fn host(&self) -> Option<String>;
     /// Absolute path of the repository root on its host.
     fn root(&self) -> String;
-    /// How many repositories this backend shows: one, or each repository
-    /// directly inside a directory that is not one itself.
-    fn repo_count(&self) -> usize;
+    /// The directory of each repository this backend shows, relative to
+    /// [`Self::root`], sorted; empty for the root itself. Paths in a status
+    /// start with their repository's directory.
+    fn repos(&self) -> Vec<String>;
     fn status(&self) -> Result<Status>;
     /// Restores one changed file to its state in HEAD.
     fn revert(&self, change: &Change) -> Result<()>;
@@ -45,15 +46,27 @@ pub trait Backend: Send + Sync {
 }
 
 /// Opens `path` as a repository, or, when it is a directory holding
-/// repositories, all of them together.
+/// repositories, all of them together, along with `path` itself if it is
+/// a repository too.
 pub fn open_path(path: &Path) -> Result<Box<dyn Backend>> {
     match Repo::discover(path) {
-        Ok(repo) => Ok(Box::new(Local::new(repo))),
+        Ok(repo) => {
+            let root = repo.root().to_path_buf();
+            let inner = Multi::inner_repos(&root)?;
+            if inner.is_empty() {
+                Ok(Box::new(Local::new(repo)))
+            } else {
+                Ok(Box::new(Multi::new(&root, Some(repo), inner)))
+            }
+        }
         Err(err) if !path.is_dir() => Err(err),
-        Err(err) => match Multi::discover(path)? {
-            Some(multi) => Ok(Box::new(multi)),
-            None => Err(err.context("it contains no repositories either")),
-        },
+        Err(err) => {
+            let inner = Multi::inner_repos(path)?;
+            if inner.is_empty() {
+                return Err(err.context("it contains no repositories either"));
+            }
+            Ok(Box::new(Multi::new(path, None, inner)))
+        }
     }
 }
 
@@ -81,8 +94,8 @@ impl Backend for Local {
         self.repo.root().display().to_string()
     }
 
-    fn repo_count(&self) -> usize {
-        1
+    fn repos(&self) -> Vec<String> {
+        vec![String::new()]
     }
 
     fn status(&self) -> Result<Status> {

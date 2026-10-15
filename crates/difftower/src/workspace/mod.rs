@@ -651,7 +651,7 @@ impl Workspace {
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let name = self.backend.name();
         let host = self.backend.host();
-        let repo_count = self.backend.repo_count();
+        let repo_count = self.backend.repos().len();
         let split = self.diff.read(cx).mode() == DiffMode::Split;
         h_flex()
             .h_10()

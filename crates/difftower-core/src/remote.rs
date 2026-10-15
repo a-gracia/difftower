@@ -126,7 +126,7 @@ impl Shared {
 /// interface refreshes. Calls fail meanwhile.
 pub struct Remote {
     root: String,
-    repo_count: usize,
+    repos: Vec<String>,
     shared: Arc<Shared>,
     next_id: AtomicU64,
 }
@@ -134,7 +134,7 @@ pub struct Remote {
 /// An agent that answered, before its messages are read.
 struct Started {
     root: String,
-    repo_count: usize,
+    repos: Vec<String>,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -145,7 +145,7 @@ impl Remote {
     /// missing, and opens the repository. `progress` receives each step.
     pub fn connect(target: SshTarget, agent: &'static [u8], progress: &dyn Fn(&str)) -> Result<Self> {
         let started = start(&target, agent, progress)?;
-        let (root, repo_count) = (started.root.clone(), started.repo_count);
+        let (root, repos) = (started.root.clone(), started.repos.clone());
         let shared = Arc::new(Shared {
             target,
             agent,
@@ -155,7 +155,7 @@ impl Remote {
             closed: AtomicBool::new(false),
         });
         attach(&shared, started, 1);
-        Ok(Self { root, repo_count, shared, next_id: AtomicU64::new(1) })
+        Ok(Self { root, repos, shared, next_id: AtomicU64::new(1) })
     }
 
     pub fn target(&self) -> &SshTarget {
@@ -234,8 +234,8 @@ fn start(target: &SshTarget, agent: &[u8], progress: &dyn Fn(&str)) -> Result<St
 
     let mut hello = String::new();
     stdout.read_line(&mut hello)?;
-    let (root, repo_count) = match serde_json::from_str::<Message>(&hello) {
-        Ok(Message::Hello { protocol, root, repo_count }) if protocol == PROTOCOL => (root, repo_count),
+    let (root, repos) = match serde_json::from_str::<Message>(&hello) {
+        Ok(Message::Hello { protocol, root, repos }) if protocol == PROTOCOL => (root, repos),
         Ok(Message::Hello { protocol, .. }) => {
             bail!("the agent speaks protocol {protocol}, expected {PROTOCOL}")
         }
@@ -251,7 +251,7 @@ fn start(target: &SshTarget, agent: &[u8], progress: &dyn Fn(&str)) -> Result<St
     // Drain stderr so a chatty agent can never block on a full pipe.
     std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
     let stdin = child.stdin.take().expect("piped");
-    Ok(Started { root, repo_count, child, stdin, stdout })
+    Ok(Started { root, repos, child, stdin, stdout })
 }
 
 /// Makes a started agent the live connection and reads its messages until
@@ -351,8 +351,8 @@ impl Backend for Remote {
         self.root.clone()
     }
 
-    fn repo_count(&self) -> usize {
-        self.repo_count
+    fn repos(&self) -> Vec<String> {
+        self.repos.clone()
     }
 
     fn status(&self) -> Result<Status> {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::Change;
 
 /// Bumped whenever a message changes shape.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Call {
@@ -36,7 +36,7 @@ pub enum Message {
         root: String,
         /// Defaulted so an agent from an older protocol still reports its version.
         #[serde(default)]
-        repo_count: usize,
+        repos: Vec<String>,
     },
     /// The agent could not start; it exits after sending this.
     Fatal { error: String },

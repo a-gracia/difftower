@@ -34,7 +34,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    send(&out, &Message::Hello { protocol: PROTOCOL, root: backend.root(), repo_count: backend.repo_count() });
+    send(&out, &Message::Hello { protocol: PROTOCOL, root: backend.root(), repos: backend.repos() });
 
     let changed_out = out.clone();
     let _watch = backend.watch(Box::new(move || send(&changed_out, &Message::Changed)));
