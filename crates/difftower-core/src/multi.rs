@@ -143,6 +143,7 @@ impl Backend for Multi {
         for ((_, repo), rules) in self.repos.iter().zip(by_repo) {
             if guard::load_rules(repo.root()).ok().as_ref() != Some(&rules) {
                 guard::save_rules(repo.root(), &rules)?;
+                repo.mark_dirty([guard::CONFIG_FILE.to_owned()]);
             }
         }
         Ok(())

@@ -1,6 +1,12 @@
 use std::{
+    collections::BTreeSet,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -45,12 +51,30 @@ impl Changes {
 /// A git working tree observed by Difftower.
 ///
 /// Snapshots are written through a private index file so the user's index,
-/// refs and stash are never touched.
+/// refs and stash are never touched. Clones share one snapshot state, so a
+/// repository has a single snapshot in progress at a time.
 #[derive(Clone, Debug)]
 pub struct Repo {
     root: PathBuf,
     git_dir: PathBuf,
     index: PathBuf,
+    state: Arc<Mutex<SnapshotState>>,
+    git_calls: Arc<AtomicUsize>,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotState {
+    /// Watchers currently reporting changed paths through [`Repo::mark_dirty`].
+    watchers: usize,
+    /// Paths changed since the last snapshot. `None` means unknown, so the
+    /// next snapshot adds everything; that is always the case unwatched.
+    dirty: Option<BTreeSet<String>>,
+    /// The last snapshot.
+    tree: Option<TreeId>,
+    /// Files listed for a snapshot.
+    files: Option<(TreeId, Vec<String>)>,
+    /// Changes computed for a base, path prefix and snapshot.
+    changes: Option<(TreeId, String, TreeId, Changes)>,
 }
 
 impl Repo {
@@ -59,11 +83,11 @@ impl Repo {
         if !path.is_dir() {
             bail!("{} does not exist or is not a directory", path.display());
         }
-        let root = git_output(path, &["rev-parse", "--show-toplevel"], None)
+        let root = git_output(path, &["rev-parse", "--show-toplevel"], None, None)
             .with_context(|| format!("{} is not inside a git repository", path.display()))?;
         let root = PathBuf::from(root.trim_end());
         let git_dir = PathBuf::from(
-            git_output(&root, &["rev-parse", "--absolute-git-dir"], None)?.trim_end(),
+            git_output(&root, &["rev-parse", "--absolute-git-dir"], None, None)?.trim_end(),
         );
         let dt_dir = git_dir.join("difftower");
         std::fs::create_dir_all(&dt_dir)?;
@@ -72,14 +96,14 @@ impl Repo {
             // Seeding from the real index reuses git's stat cache, so the
             // first snapshot does not rehash every file.
             let real = PathBuf::from(
-                git_output(&root, &["rev-parse", "--path-format=absolute", "--git-path", "index"], None)?
+                git_output(&root, &["rev-parse", "--path-format=absolute", "--git-path", "index"], None, None)?
                     .trim_end(),
             );
             if real.exists() {
                 std::fs::copy(&real, &index)?;
             }
         }
-        Ok(Self { root, git_dir, index })
+        Ok(Self { root, git_dir, index, state: Arc::default(), git_calls: Arc::default() })
     }
 
     pub fn root(&self) -> &Path {
@@ -91,14 +115,85 @@ impl Repo {
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
-        git_output(&self.root, args, Some(&self.index))
+        self.git_calls.fetch_add(1, Ordering::Relaxed);
+        git_output(&self.root, args, Some(&self.index), None)
+    }
+
+    /// How many git processes this repository has run, for tests that guard
+    /// against refresh loops.
+    #[doc(hidden)]
+    pub fn git_calls(&self) -> usize {
+        self.git_calls.load(Ordering::Relaxed)
     }
 
     /// Records the whole working tree, untracked files included and ignored
     /// files excluded, as a tree object.
+    ///
+    /// While a watcher reports changed paths, only those are re-added, and
+    /// with none the previous tree is returned without running git.
     pub fn snapshot(&self) -> Result<TreeId> {
-        self.git(&["add", "--all", "--", "."])?;
+        let mut state = self.state.lock().unwrap();
+        let dirty = state.dirty.take();
+        let result = self.write_snapshot(dirty.as_ref(), state.tree.as_ref());
+        match &result {
+            Ok(tree) => {
+                state.tree = Some(tree.clone());
+                state.dirty = (state.watchers > 0).then(BTreeSet::new);
+            }
+            Err(_) => state.dirty = None,
+        }
+        result
+    }
+
+    fn write_snapshot(&self, dirty: Option<&BTreeSet<String>>, last: Option<&TreeId>) -> Result<TreeId> {
+        match (dirty, last) {
+            (Some(paths), Some(tree)) if paths.is_empty() => return Ok(tree.clone()),
+            // A path that vanished before git saw it fails the pathspec;
+            // adding everything is always right.
+            (Some(paths), Some(_)) if self.add_paths(paths).is_ok() => {}
+            _ => {
+                self.git(&["add", "--all", "--", "."])?;
+            }
+        }
         Ok(TreeId(self.git(&["write-tree"])?.trim_end().to_owned()))
+    }
+
+    fn add_paths(&self, paths: &BTreeSet<String>) -> Result<()> {
+        self.git_calls.fetch_add(1, Ordering::Relaxed);
+        let list: Vec<u8> = paths.iter().flat_map(|p| p.bytes().chain([0])).collect();
+        git_output(
+            &self.root,
+            &["--literal-pathspecs", "add", "--all", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            Some(&self.index),
+            Some(&list),
+        )?;
+        Ok(())
+    }
+
+    /// Starts accepting changed paths from a watcher; the next snapshot still
+    /// adds everything, since earlier edits were not seen.
+    pub(crate) fn start_tracking(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.watchers += 1;
+        state.dirty = None;
+    }
+
+    pub(crate) fn stop_tracking(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.watchers -= 1;
+        state.dirty = None;
+    }
+
+    /// Notes paths, relative to the root, that changed on disk.
+    pub(crate) fn mark_dirty(&self, paths: impl IntoIterator<Item = String>) {
+        if let Some(dirty) = &mut self.state.lock().unwrap().dirty {
+            dirty.extend(paths);
+        }
+    }
+
+    /// Forgets which paths changed, so the next snapshot adds everything.
+    pub(crate) fn mark_all_dirty(&self) {
+        self.state.lock().unwrap().dirty = None;
     }
 
     /// The tree of the current commit, or the empty tree before the first commit.
@@ -123,6 +218,17 @@ impl Repo {
         if current == *base {
             return Ok(Changes::default());
         }
+        if let Some((b, p, c, changes)) = &self.state.lock().unwrap().changes
+            && (b, p.as_str(), c) == (base, prefix, &current)
+        {
+            return Ok(changes.clone());
+        }
+        let changes = self.diff(base, &current, prefix)?;
+        self.state.lock().unwrap().changes = Some((base.clone(), prefix.to_owned(), current, changes.clone()));
+        Ok(changes)
+    }
+
+    fn diff(&self, base: &TreeId, current: &TreeId, prefix: &str) -> Result<Changes> {
         let names = self.git(&[
             "diff-tree", "-r", "-z", "-M", "--name-status", "--no-ext-diff", &base.0, &current.0,
         ])?;
@@ -166,12 +272,26 @@ impl Repo {
     /// Every file in the working tree as of the last snapshot, ignored files
     /// excluded, sorted by path.
     pub fn files(&self) -> Result<Vec<String>> {
+        let last = self.state.lock().unwrap().tree.clone();
+        let tree = match last {
+            Some(tree) => tree,
+            None => self.snapshot()?,
+        };
+        if let Some((t, files)) = &self.state.lock().unwrap().files
+            && *t == tree
+        {
+            return Ok(files.clone());
+        }
         let out = self.git(&["ls-files", "-z", "--cached"])?;
-        Ok(out.split('\0').filter(|f| !f.is_empty()).map(str::to_owned).collect())
+        let files: Vec<String> = out.split('\0').filter(|f| !f.is_empty()).map(str::to_owned).collect();
+        self.state.lock().unwrap().files = Some((tree, files.clone()));
+        Ok(files)
     }
 
     /// Restores one changed file to its state in `base`.
     pub fn revert(&self, base: &TreeId, change: &Change) -> Result<()> {
+        // Seen by the next snapshot even before the watcher reports it.
+        self.mark_dirty(change.old_path.iter().chain([&change.path]).cloned());
         match change.status {
             ChangeStatus::Added => self.remove(&change.path),
             ChangeStatus::Renamed => {
@@ -195,17 +315,23 @@ impl Repo {
     }
 }
 
-fn git_output(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String> {
+fn git_output(cwd: &Path, args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.current_dir(cwd)
         .args(["-c", "core.quotePath=false"])
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .env("GIT_OPTIONAL_LOCKS", "0");
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
-    let out = cmd.output().context("failed to run git")?;
+    let mut child = cmd.spawn().context("failed to run git")?;
+    if let Some(input) = input {
+        child.stdin.take().expect("piped").write_all(input)?;
+    }
+    let out = child.wait_with_output()?;
     if !out.status.success() {
         bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }

@@ -131,3 +131,37 @@ fn serves_a_directory_of_repositories() {
     let paths: Vec<_> = remote.status().unwrap().changes.into_iter().map(|c| c.path).collect();
     assert_eq!(paths, ["api/README.md", "web/README.md"]);
 }
+
+/// The interface asks for a status after every change notification; if the
+/// agent's own snapshots counted as changes, that would never stop.
+#[test]
+fn an_idle_repository_sends_no_change_notifications() {
+    let _env = ENV.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = home.join("app");
+    fs::create_dir_all(repo.join("log")).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(repo.join(".gitignore"), "/log/*\n").unwrap();
+    fs::write(repo.join("app.rb"), "puts 1\n").unwrap();
+    fake_ssh(tmp.path(), &home);
+    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
+    let remote = Remote::connect(SshTarget::parse("box:~/app").unwrap(), &agent, &|_| {}).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let _watch = remote.watch(Box::new(move || { let _ = tx.send(()); })).unwrap();
+    std::thread::sleep(Duration::from_millis(600));
+    while rx.try_recv().is_ok() {}
+    for i in 0..10 {
+        remote.status().unwrap();
+        // A dev server writing its log on every request.
+        fs::write(repo.join("log/development.log"), format!("GET / {i}\n")).unwrap();
+    }
+    assert!(
+        rx.recv_timeout(Duration::from_millis(800)).is_err(),
+        "refreshing an idle repository produced a change notification"
+    );
+
+    fs::write(repo.join("app.rb"), "puts 2\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).expect("a real edit is still reported");
+}

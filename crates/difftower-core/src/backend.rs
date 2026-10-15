@@ -96,7 +96,10 @@ impl Backend for Local {
     }
 
     fn save_rules(&self, rules: &[String]) -> Result<()> {
-        guard::save_rules(self.repo.root(), rules)
+        guard::save_rules(self.repo.root(), rules)?;
+        // Seen by the next snapshot even before the watcher reports it.
+        self.repo.mark_dirty([guard::CONFIG_FILE.to_owned()]);
+        Ok(())
     }
 
     fn save_approvals(&self, text: &str) -> Result<()> {
