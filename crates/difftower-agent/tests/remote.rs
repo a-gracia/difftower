@@ -27,6 +27,11 @@ fn fake_ssh(dir: &Path, home: &Path) {
     }
 }
 
+/// The agent binary, leaked so it can live as long as a connection.
+fn agent() -> &'static [u8] {
+    fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap().leak()
+}
+
 fn git(dir: &Path, args: &[&str]) {
     assert!(Command::new("git").current_dir(dir).args(args).status().unwrap().success());
 }
@@ -52,10 +57,10 @@ fn installs_the_agent_and_serves_a_repository() {
 
     fake_ssh(tmp.path(), &home);
 
-    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
+    let agent = agent();
     let target = SshTarget::parse("box:~/project").unwrap();
     let steps = std::cell::RefCell::new(Vec::new());
-    let remote = Remote::connect(target.clone(), &agent, &|s| steps.borrow_mut().push(s.to_owned())).unwrap();
+    let remote = Remote::connect(target.clone(), agent, &|s| steps.borrow_mut().push(s.to_owned())).unwrap();
     assert!(steps.borrow().iter().any(|s| s.contains("Installing")));
     let installed: Vec<_> = fs::read_dir(home.join(".cache/difftower")).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(installed.len(), 1, "old agents are removed: {installed:?}");
@@ -86,7 +91,7 @@ fn installs_the_agent_and_serves_a_repository() {
     // A second connection reuses the installed agent.
     drop(remote);
     steps.borrow_mut().clear();
-    Remote::connect(target, &agent, &|s| steps.borrow_mut().push(s.to_owned())).unwrap();
+    Remote::connect(target, agent, &|s| steps.borrow_mut().push(s.to_owned())).unwrap();
     assert!(!steps.borrow().iter().any(|s| s.contains("Installing")));
 }
 
@@ -95,9 +100,9 @@ fn reports_a_path_that_is_not_a_repository() {
     let _env = ENV.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     fake_ssh(tmp.path(), tmp.path());
-    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
+    let agent = agent();
     let target = SshTarget::parse(&format!("box:{}", tmp.path().display())).unwrap();
-    let err = Remote::connect(target, &agent, &|_| {}).err().expect("connect fails");
+    let err = Remote::connect(target, agent, &|_| {}).err().expect("connect fails");
     assert!(err.to_string().contains("not inside a git repository"), "{err}");
 }
 
@@ -106,9 +111,9 @@ fn reports_a_missing_directory() {
     let _env = ENV.lock().unwrap();
     let tmp = tempfile::tempdir().unwrap();
     fake_ssh(tmp.path(), tmp.path());
-    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
+    let agent = agent();
     let target = SshTarget::parse("box:/nonexistent/repo").unwrap();
-    let err = Remote::connect(target, &agent, &|_| {}).err().expect("connect fails");
+    let err = Remote::connect(target, agent, &|_| {}).err().expect("connect fails");
     assert_eq!(err.to_string(), "/nonexistent/repo does not exist or is not a directory");
 }
 
@@ -124,8 +129,8 @@ fn serves_a_directory_of_repositories() {
         fs::write(repo.join("README.md"), name).unwrap();
     }
     fake_ssh(tmp.path(), &home);
-    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
-    let remote = Remote::connect(SshTarget::parse("box:~/repos").unwrap(), &agent, &|_| {}).unwrap();
+    let agent = agent();
+    let remote = Remote::connect(SshTarget::parse("box:~/repos").unwrap(), agent, &|_| {}).unwrap();
     assert_eq!(remote.repo_count(), 2);
     assert_eq!(remote.name(), "repos");
     let paths: Vec<_> = remote.status().unwrap().changes.into_iter().map(|c| c.path).collect();
@@ -145,8 +150,8 @@ fn an_idle_repository_sends_no_change_notifications() {
     fs::write(repo.join(".gitignore"), "/log/*\n").unwrap();
     fs::write(repo.join("app.rb"), "puts 1\n").unwrap();
     fake_ssh(tmp.path(), &home);
-    let agent = fs::read(env!("CARGO_BIN_EXE_difftower-agent")).unwrap();
-    let remote = Remote::connect(SshTarget::parse("box:~/app").unwrap(), &agent, &|_| {}).unwrap();
+    let agent = agent();
+    let remote = Remote::connect(SshTarget::parse("box:~/app").unwrap(), agent, &|_| {}).unwrap();
 
     let (tx, rx) = mpsc::channel();
     let _watch = remote.watch(Box::new(move || { let _ = tx.send(()); })).unwrap();
@@ -164,4 +169,34 @@ fn an_idle_repository_sends_no_change_notifications() {
 
     fs::write(repo.join("app.rb"), "puts 2\n").unwrap();
     rx.recv_timeout(Duration::from_secs(5)).expect("a real edit is still reported");
+}
+
+/// A dropped connection, here the agent dying on the host, heals on its own
+/// and tells the interface to refresh.
+#[test]
+fn reconnects_after_the_connection_drops() {
+    let _env = ENV.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = home.join("app");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(repo.join("a.rb"), "1\n").unwrap();
+    fake_ssh(tmp.path(), &home);
+    let remote = Remote::connect(SshTarget::parse("box:~/app").unwrap(), agent(), &|_| {}).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let _watch = remote.watch(Box::new(move || { let _ = tx.send(()); })).unwrap();
+    assert_eq!(remote.status().unwrap().changes.len(), 1);
+
+    let agents = home.join(".cache/difftower");
+    assert!(Command::new("pkill").arg("-f").arg(&agents).status().unwrap().success());
+    rx.recv_timeout(Duration::from_secs(5)).expect("the drop is reported");
+    assert!(remote.status().unwrap_err().to_string().contains("reconnecting"));
+
+    rx.recv_timeout(Duration::from_secs(10)).expect("the reconnection is reported");
+    assert_eq!(remote.status().unwrap().changes.len(), 1);
+    // The new agent watches the repository too.
+    fs::write(repo.join("b.rb"), "2\n").unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).expect("changes are reported again");
+    assert_eq!(remote.status().unwrap().changes.len(), 2);
 }

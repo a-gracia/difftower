@@ -1261,6 +1261,9 @@ dependencies = [
  "async-channel",
  "difftower-core",
  "gpui-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

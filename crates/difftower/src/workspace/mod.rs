@@ -15,15 +15,14 @@ use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     diff::{DiffFile, DiffMode, DiffState},
-    h_flex,
-    resizable::{h_resizable, resizable_panel},
-    v_flex,
+    h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::{
     file_tree::{self, FileTree, Row},
+    settings::Settings,
     terminal::{TerminalCommand, TerminalView},
 };
 
@@ -44,6 +43,18 @@ pub enum WorkspaceEvent {
 }
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
+
+/// Narrowest the diff may get when panels are dragged wide.
+const MIN_DIFF_WIDTH: f32 = 240.;
+const MIN_SIDEBAR_WIDTH: f32 = 160.;
+const MIN_TERMINAL_WIDTH: f32 = 240.;
+
+/// A divider between panels being dragged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Divider {
+    Sidebar,
+    Terminal,
+}
 
 /// Files larger than this are not previewed.
 const PREVIEW_LIMIT: usize = 2 * 1024 * 1024;
@@ -94,8 +105,9 @@ pub struct Workspace {
     /// Repositories folded in the Changes tab of a multi-repository workspace.
     collapsed_repos: HashSet<String>,
     diff: Entity<DiffState>,
-    /// Wrap long lines instead of scrolling sideways.
-    soft_wrap: bool,
+    /// Panel widths and diff layout, saved for the next session.
+    settings: Settings,
+    dragging: Option<Divider>,
     /// The changed file in the diff and the hash of its patch, when one is.
     shown: Option<(String, u64)>,
     /// Lines added and removed across all changes.
@@ -103,7 +115,6 @@ pub struct Workspace {
     preview: Option<Preview>,
     _preview_task: Option<Task<()>>,
     terminal: Option<Entity<TerminalView>>,
-    show_terminal: bool,
     selected: Option<String>,
     error: Option<SharedString>,
     refreshing: Option<Task<()>>,
@@ -120,7 +131,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let mut error = None;
-        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(DiffMode::Unified));
+        let settings = Settings::load();
+        let mode = if settings.split { DiffMode::Split } else { DiffMode::Unified };
+        let diff = cx.new(|cx| DiffState::new([], cx).with_mode(mode));
 
         let (tx, rx) = async_channel::bounded::<()>(1);
         let watcher = match backend.watch(Box::new(move || {
@@ -172,13 +185,13 @@ impl Workspace {
             collapsed_repos: HashSet::new(),
             expanded_rules: HashSet::new(),
             diff,
-            soft_wrap: false,
+            settings,
+            dragging: None,
             shown: None,
             totals: (0, 0),
             preview: None,
             _preview_task: None,
             terminal,
-            show_terminal: true,
             selected: None,
             error,
             refreshing: None,
@@ -479,8 +492,76 @@ impl Workspace {
     }
 
     fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
-        self.soft_wrap = !self.soft_wrap;
+        self.settings.soft_wrap = !self.settings.soft_wrap;
+        self.save_settings();
         cx.notify();
+    }
+
+    fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
+        self.settings.show_terminal = !self.settings.show_terminal;
+        self.save_settings();
+        cx.notify();
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(err) = self.settings.save() {
+            self.error = Some(format!("Could not save settings: {err}").into());
+        }
+    }
+
+    /// Resizes the panel whose divider is being dragged to the pointer.
+    fn drag_divider(&mut self, x: Pixels, window: &Window, cx: &mut Context<Self>) {
+        let Some(divider) = self.dragging else { return };
+        let width = f32::from(window.viewport_size().width);
+        let x = f32::from(x);
+        let terminal = if self.terminal_visible() { self.settings.terminal_width } else { 0. };
+        match divider {
+            Divider::Sidebar => {
+                let max = (width - terminal - MIN_DIFF_WIDTH).max(MIN_SIDEBAR_WIDTH);
+                self.settings.sidebar_width = x.clamp(MIN_SIDEBAR_WIDTH, max);
+            }
+            Divider::Terminal => {
+                let max = (width - self.settings.sidebar_width - MIN_DIFF_WIDTH).max(MIN_TERMINAL_WIDTH);
+                self.settings.terminal_width = (width - x).clamp(MIN_TERMINAL_WIDTH, max);
+            }
+        }
+        cx.notify();
+    }
+
+    fn end_drag(&mut self, cx: &mut Context<Self>) {
+        if self.dragging.take().is_some() {
+            self.save_settings();
+            cx.notify();
+        }
+    }
+
+    fn terminal_visible(&self) -> bool {
+        self.settings.show_terminal && self.terminal.is_some()
+    }
+
+    fn render_divider(&self, divider: Divider, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let active = self.dragging == Some(divider);
+        div()
+            .id(match divider {
+                Divider::Sidebar => "divider-sidebar",
+                Divider::Terminal => "divider-terminal",
+            })
+            .flex_none()
+            .w(px(5.))
+            .h_full()
+            .cursor_col_resize()
+            .flex()
+            .justify_center()
+            .child(div().w(px(1.)).h_full().bg(if active { theme.primary } else { theme.border }))
+            .hover(|el| el.bg(theme.primary.opacity(0.25)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.dragging = Some(divider);
+                    cx.notify();
+                }),
+            )
     }
 
     fn toggle_mode(&mut self, cx: &mut Context<Self>) {
@@ -491,6 +572,8 @@ impl Workspace {
             };
             diff.set_mode(mode, cx);
         });
+        self.settings.split = self.diff.read(cx).mode() == DiffMode::Split;
+        self.save_settings();
         // The diff element is built here, so this view must render again.
         cx.notify();
     }
@@ -544,20 +627,17 @@ impl Workspace {
                     .small()
                     .ghost()
                     .icon(IconName::SquareTerminal)
-                    .selected(self.show_terminal)
+                    .selected(self.settings.show_terminal)
                     .tooltip("Toggle terminal")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_terminal = !this.show_terminal;
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
             )
             .child(
                 Button::new("wrap")
                     .small()
                     .ghost()
                     .icon(Icon::new(Lucide::TextWrap))
-                    .selected(self.soft_wrap)
-                    .tooltip("Wrap long lines (Alt+Z)")
+                    .selected(self.settings.soft_wrap || self.settings.split)
+                    .tooltip(if self.settings.split { "Split view always wraps long lines" } else { "Wrap long lines (Alt+Z)" })
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
             )
             .child(
@@ -576,8 +656,6 @@ impl Workspace {
             .size_full()
             .min_w_0()
             .overflow_hidden()
-            .border_l_1()
-            .border_color(cx.theme().border)
             .child(
                 h_flex()
                     .h_8()
@@ -670,10 +748,20 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Initial panel sizes; the resizable group remembers user changes.
-        let width = window.viewport_size().width;
-        let sidebar_width = (width * 0.2).clamp(px(220.), px(340.));
-        let terminal_width = width * 0.4;
+        // The side panels keep the width the user gave them; the diff takes
+        // the rest. In a window too narrow for all three, the terminal and
+        // then the file list give way without changing the saved widths.
+        let width = f32::from(window.viewport_size().width);
+        let terminal = self.terminal.clone().filter(|_| self.settings.show_terminal);
+        let mut sidebar_width = self.settings.sidebar_width.max(MIN_SIDEBAR_WIDTH);
+        let mut terminal_width =
+            if terminal.is_some() { self.settings.terminal_width.max(MIN_TERMINAL_WIDTH) } else { 0. };
+        let overflow = sidebar_width + terminal_width + MIN_DIFF_WIDTH - width;
+        if overflow > 0. {
+            let from_terminal = overflow.min((terminal_width - MIN_TERMINAL_WIDTH).max(0.));
+            terminal_width -= from_terminal;
+            sidebar_width = (sidebar_width - (overflow - from_terminal)).max(MIN_SIDEBAR_WIDTH);
+        }
         let theme = cx.theme();
         v_flex()
             .size_full()
@@ -683,17 +771,24 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_tab(SidebarTab::Files, cx)))
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))
             .on_action(cx.listener(|this, _: &ToggleWrap, _, cx| this.toggle_wrap(cx)))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.drag_divider(event.position.x, window, cx)
+            }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| this.end_drag(cx)))
             .child(self.render_toolbar(cx))
             .child(
-                h_resizable("main")
-                    .child(resizable_panel().size(sidebar_width).child(self.render_sidebar(cx)))
-                    .child(
-                        resizable_panel()
-                            .size_range(px(240.)..Pixels::MAX)
-                            .child(div().size_full().min_w_0().overflow_hidden().child(self.render_main(cx))),
-                    )
-                    .when_some(self.terminal.clone().filter(|_| self.show_terminal), |group, terminal| {
-                        group.child(resizable_panel().size(terminal_width).child(self.render_terminal(terminal, cx)))
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(div().flex_none().w(px(sidebar_width)).h_full().child(self.render_sidebar(cx)))
+                    .child(self.render_divider(Divider::Sidebar, cx))
+                    .child(div().flex_1().min_w_0().h_full().overflow_hidden().child(self.render_main(cx)))
+                    .when_some(terminal, |row, terminal| {
+                        row.child(self.render_divider(Divider::Terminal, cx)).child(
+                            div().flex_none().w(px(terminal_width)).h_full().child(self.render_terminal(terminal, cx)),
+                        )
                     }),
             )
             .child(self.render_status_bar(cx))

@@ -50,6 +50,14 @@ unprotects everything inside, and unprotecting a single file inside a
 protected folder adds an exception. Difftower keeps the rule list minimal
 as you click. The Protected tab lists the files each rule covers.
 
+## Your preferences
+
+Panel widths, unified or split diffs, wrapping and whether the terminal
+is shown are kept per user in `~/.config/difftower/settings.json`
+(`$XDG_CONFIG_HOME` is honored), separate from the repository's
+`.difftower.toml`. Drag the dividers to resize: the file list and the
+terminal keep their width and the diff takes the rest.
+
 ## Keyboard
 
 | Keys | Action |
@@ -83,6 +91,12 @@ Difftower version carries its matching agent and replaces the old one on
 the next connection, so there is nothing to install or update by hand.
 The terminal opens a shell on the host in the repository, so agents run
 there. All of it shares one SSH connection.
+
+If the connection drops, Difftower reconnects in the background, waiting
+longer between attempts (up to 30 s), and refreshes once it is back; the
+terminal opens a new session too. Programs running in the old remote
+session end with it, so run long-lived agents inside `tmux` on the host to
+pick them up again.
 
 Requirements on the host: Linux x86_64 and git. Authentication must not
 prompt (use a key or an SSH agent).

@@ -7,6 +7,7 @@ mod file_tree;
 mod home;
 mod open;
 mod recent;
+mod settings;
 mod terminal;
 mod workspace;
 

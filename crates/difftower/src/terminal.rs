@@ -5,6 +5,7 @@ use std::{
     borrow::Cow,
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::{Duration, Instant},
 };
 
 use alacritty_terminal::{
@@ -25,12 +26,18 @@ const FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 1.3;
 
 /// What the terminal runs.
+#[derive(Clone)]
 pub enum TerminalCommand {
     /// The user's shell in a local directory.
     Shell { cwd: PathBuf },
     /// A program, such as `ssh -t host`, that provides the shell itself.
     Program { program: String, args: Vec<String> },
 }
+
+/// ssh's exit status when the connection, not the remote shell, failed.
+const SSH_CONNECTION_FAILED: i32 = 255;
+/// A session that lasted this long resets the reconnection backoff.
+const STABLE_SESSION: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct Listener(async_channel::Sender<TermEvent>);
@@ -41,13 +48,29 @@ impl EventListener for Listener {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Session {
+    Running,
+    /// The shell ended; Enter starts a new one.
+    Exited,
+    /// The ssh connection dropped; a new session starts after a delay.
+    Reconnecting,
+}
+
 pub struct TerminalView {
     term: Arc<FairMutex<Term<Listener>>>,
-    pty: EventLoopSender,
+    command: TerminalCommand,
+    listener: Listener,
+    pty: Option<EventLoopSender>,
     focus: FocusHandle,
     size: (usize, usize),
+    cell: Size<Pixels>,
     title: Option<SharedString>,
-    exited: bool,
+    session: Session,
+    started: Instant,
+    /// Wait before the next reconnection attempt, doubled after each.
+    backoff: Duration,
+    _reconnect: Option<Task<()>>,
     _events: Task<()>,
 }
 
@@ -61,9 +84,42 @@ impl TerminalView {
             &TermSize::new(size.0, size.1),
             listener.clone(),
         )));
-        let (shell, working_directory) = match command {
-            TerminalCommand::Shell { cwd } => (None, Some(cwd)),
-            TerminalCommand::Program { program, args } => (Some(tty::Shell::new(program, args)), None),
+        let view = cx.new(|cx| {
+            let events = cx.spawn_in(window, async move |this, cx| {
+                while let Ok(event) = rx.recv().await {
+                    if this.update(cx, |this: &mut Self, cx| this.on_event(event, cx)).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self {
+                term,
+                command,
+                listener,
+                pty: None,
+                focus: cx.focus_handle(),
+                size,
+                cell: Size::default(),
+                title: None,
+                session: Session::Running,
+                started: Instant::now(),
+                backoff: Duration::from_secs(1),
+                _reconnect: None,
+                _events: events,
+            }
+        });
+        view.update(cx, |this, _| this.spawn())?;
+        Ok(view)
+    }
+
+    /// Starts the shell, or the ssh session, on the existing screen, so
+    /// what was printed before stays in the scrollback.
+    fn spawn(&mut self) -> anyhow::Result<()> {
+        let (shell, working_directory) = match &self.command {
+            TerminalCommand::Shell { cwd } => (None, Some(cwd.clone())),
+            TerminalCommand::Program { program, args } => {
+                (Some(tty::Shell::new(program.clone(), args.clone())), None)
+            }
         };
         let options = tty::Options {
             shell,
@@ -74,52 +130,55 @@ impl TerminalView {
                 .collect(),
             ..Default::default()
         };
-        let pty = tty::new(&options, window_size(size, Size::default()), 0)?;
-        let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
-        let sender = event_loop.channel();
+        let pty = tty::new(&options, window_size(self.size, self.cell), 0)?;
+        let event_loop = EventLoop::new(self.term.clone(), self.listener.clone(), pty, false, false)?;
+        self.pty = Some(event_loop.channel());
         event_loop.spawn();
-
-        Ok(cx.new(|cx| Self::with_pty(term, sender, rx, window, cx)))
+        self.session = Session::Running;
+        self.started = Instant::now();
+        Ok(())
     }
 
-    fn with_pty(
-        term: Arc<FairMutex<Term<Listener>>>,
-        pty: EventLoopSender,
-        rx: async_channel::Receiver<TermEvent>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let events = cx.spawn_in(window, async move |this, cx| {
-            while let Ok(event) = rx.recv().await {
-                let alive = this.update(cx, |this, cx| {
-                    match event {
-                        TermEvent::Wakeup => {}
-                        TermEvent::Title(title) => this.title = Some(title.into()),
-                        TermEvent::ResetTitle => this.title = None,
-                        TermEvent::PtyWrite(text) => this.write(text.into_bytes()),
-                        TermEvent::ClipboardStore(_, text) => {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text))
-                        }
-                        TermEvent::ChildExit(_) | TermEvent::Exit => this.exited = true,
-                        _ => return,
-                    }
-                    cx.notify();
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        });
-
-        Self {
-            term,
-            pty,
-            focus: cx.focus_handle(),
-            size: (80, 24),
-            title: None,
-            exited: false,
-            _events: events,
+    fn on_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+        match event {
+            TermEvent::Wakeup => {}
+            TermEvent::Title(title) => self.title = Some(title.into()),
+            TermEvent::ResetTitle => self.title = None,
+            TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
+            TermEvent::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            TermEvent::ChildExit(status) => self.on_exit(status.code(), cx),
+            TermEvent::Exit if self.session == Session::Running => self.session = Session::Exited,
+            _ => return,
         }
+        cx.notify();
+    }
+
+    fn on_exit(&mut self, code: Option<i32>, cx: &mut Context<Self>) {
+        self.pty = None;
+        let remote = matches!(self.command, TerminalCommand::Program { .. });
+        if !remote || code != Some(SSH_CONNECTION_FAILED) {
+            self.session = Session::Exited;
+            return;
+        }
+        if self.started.elapsed() >= STABLE_SESSION {
+            self.backoff = Duration::from_secs(1);
+        }
+        let delay = self.backoff;
+        self.backoff = (self.backoff * 2).min(Duration::from_secs(30));
+        self.session = Session::Reconnecting;
+        self._reconnect = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| this.restart(cx)).ok();
+        }));
+    }
+
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        self._reconnect = None;
+        if let Err(err) = self.spawn() {
+            self.session = Session::Exited;
+            self.title = Some(format!("Could not start the terminal: {err}").into());
+        }
+        cx.notify();
     }
 
     pub fn title(&self) -> Option<SharedString> {
@@ -127,7 +186,9 @@ impl TerminalView {
     }
 
     fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
-        let _ = self.pty.send(Msg::Input(bytes.into()));
+        if let Some(pty) = &self.pty {
+            let _ = pty.send(Msg::Input(bytes.into()));
+        }
     }
 
     /// Sends text as if it were pasted, so agents treat newlines as content.
@@ -145,13 +206,23 @@ impl TerminalView {
             return;
         }
         self.size = (cols, rows);
+        self.cell = cell;
         self.term.lock().resize(TermSize::new(cols, rows));
-        let _ = self.pty.send(Msg::Resize(window_size(self.size, cell)));
+        if let Some(pty) = &self.pty {
+            let _ = pty.send(Msg::Resize(window_size(self.size, cell)));
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let mods = keystroke.modifiers;
+        if self.session != Session::Running {
+            if keystroke.key == "enter" {
+                self.restart(cx);
+            }
+            cx.stop_propagation();
+            return;
+        }
         if mods.control && mods.shift && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 self.paste(&text);
@@ -191,7 +262,9 @@ impl TerminalView {
 impl Drop for TerminalView {
     fn drop(&mut self) {
         // Ends the PTY loop, which hangs up the shell or the ssh session.
-        let _ = self.pty.send(Msg::Shutdown);
+        if let Some(pty) = &self.pty {
+            let _ = pty.send(Msg::Shutdown);
+        }
     }
 }
 
@@ -238,8 +311,20 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
-            .when(self.exited, |el| {
-                el.child(div().text_xs().text_color(cx.theme().muted_foreground).child("Process exited"))
+            .when(self.session != Session::Running, |el| {
+                let message = match self.session {
+                    Session::Reconnecting => "Connection lost · reconnecting… (Enter to retry now)",
+                    _ => "Session ended · press Enter to start a new one",
+                };
+                el.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .bg(cx.theme().secondary)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(message),
+                )
             })
     }
 }

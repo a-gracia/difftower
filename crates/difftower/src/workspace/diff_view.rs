@@ -34,7 +34,7 @@ impl Workspace {
     fn render_preview(&self, preview: &super::Preview, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let body = match (&preview.state, &preview.message) {
-            (Some(state), _) => Diff::new(state).header_visible(false).soft_wrap(self.soft_wrap).into_any_element(),
+            (Some(state), _) => Diff::new(state).header_visible(false).soft_wrap(self.settings.soft_wrap).into_any_element(),
             (None, message) => div()
                 .size_full()
                 .flex()
@@ -113,8 +113,11 @@ impl Workspace {
         // Actions sit right after the file name, not at the end of the
         // header: the header is as wide as the longest line, so its end can
         // be scrolled out of view.
+        // Split columns scroll sideways together in the diff component, so
+        // the right side of a long line ends up off screen; wrapping keeps
+        // each side within its half.
         Diff::new(&self.diff)
-            .soft_wrap(self.soft_wrap)
+            .soft_wrap(self.settings.soft_wrap || self.settings.split)
             .render_header_title_suffix(move |file, _, cx| {
                 let path = file.path().to_string();
                 let state = states.get(&path);
