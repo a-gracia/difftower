@@ -36,8 +36,19 @@ team can commit and share them:
 protect = ["tests/**", "migrations/**", "Cargo.lock"]
 ```
 
-The shield next to a file or folder in the tree, or on a diff header,
-adds or removes the rule for it (`path` for a file, `path/**` for a folder).
+As in `.gitignore`, a rule starting with `!` is an exception and the last
+matching rule wins:
+
+```toml
+[guard]
+protect = ["tests/**", "!tests/fixtures/scratch.json"]
+```
+
+The shield next to a file or folder in the tree works like a checkbox:
+a folder is fully, partly or not protected, clicking it protects or
+unprotects everything inside, and unprotecting a single file inside a
+protected folder adds an exception. Difftower keeps the rule list minimal
+as you click. The Protected tab lists the files each rule covers.
 
 ## Keyboard
 
@@ -46,6 +57,7 @@ adds or removes the rule for it (`path` for a file, `path/**` for a folder).
 | `Ctrl+1` | Changes |
 | `Ctrl+2` | Files |
 | `Ctrl+3` | Protected |
+| `Alt+Z` | Wrap long lines |
 
 ## Several repositories at once
 
@@ -81,6 +93,11 @@ The working tree, untracked files included, is written as a git tree
 through a private index file (`.git/difftower/index`) and diffed against
 HEAD.
 Your own index, branches and stash are never touched.
+
+## Credits
+
+File icons come from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme)
+(MIT), see `crates/difftower/assets/file-icons/LICENSE`.
 
 ## Building
 

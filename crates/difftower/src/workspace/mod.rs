@@ -27,13 +27,14 @@ use crate::{
     terminal::{TerminalCommand, TerminalView},
 };
 
-gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected]);
+gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected, ToggleWrap]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-1", ShowChanges, None),
         KeyBinding::new("ctrl-2", ShowFiles, None),
         KeyBinding::new("ctrl-3", ShowProtected, None),
+        KeyBinding::new("alt-z", ToggleWrap, None),
     ]);
 }
 
@@ -80,14 +81,25 @@ pub struct Workspace {
     /// patch changes again drops back to unreviewed.
     reviewed: HashMap<String, u64>,
     tree: FileTree,
+    /// Every file in the working tree.
+    files: Vec<String>,
     files_hash: u64,
+    /// Protected and total files below each directory, for its shield.
+    protection: HashMap<String, (usize, usize)>,
     expanded: HashSet<String>,
     rows: Rc<Vec<Row>>,
     tab: SidebarTab,
+    /// Rules whose covered files are listed in the Protected tab.
+    expanded_rules: HashSet<String>,
     /// Repositories folded in the Changes tab of a multi-repository workspace.
     collapsed_repos: HashSet<String>,
     diff: Entity<DiffState>,
-    patch_hash: u64,
+    /// Wrap long lines instead of scrolling sideways.
+    soft_wrap: bool,
+    /// The changed file in the diff and the hash of its patch, when one is.
+    shown: Option<(String, u64)>,
+    /// Lines added and removed across all changes.
+    totals: (usize, usize),
     preview: Option<Preview>,
     _preview_task: Option<Task<()>>,
     terminal: Option<Entity<TerminalView>>,
@@ -151,13 +163,18 @@ impl Workspace {
             approvals_loaded: false,
             reviewed: HashMap::new(),
             tree: FileTree::default(),
+            files: Vec::new(),
             files_hash: 0,
+            protection: HashMap::new(),
             expanded: HashSet::new(),
             rows: Rc::default(),
             tab: SidebarTab::Changes,
             collapsed_repos: HashSet::new(),
+            expanded_rules: HashSet::new(),
             diff,
-            patch_hash: 0,
+            soft_wrap: false,
+            shown: None,
+            totals: (0, 0),
             preview: None,
             _preview_task: None,
             terminal,
@@ -214,20 +231,13 @@ impl Workspace {
             self.approvals_loaded = true;
         }
 
-        let patch: String = changes.iter().map(|c| c.patch.as_str()).collect();
-        let patch_hash = hash(&patch);
-        if patch_hash != self.patch_hash {
-            self.patch_hash = patch_hash;
-            match DiffFile::parse(&patch) {
-                Ok(files) => self.diff.update(cx, |diff, cx| diff.set_files(files, cx)),
-                Err(err) => self.error = Some(format!("Could not parse the diff: {}", err.message()).into()),
-            }
-        }
+        self.totals = changes.iter().map(|c| line_counts(&c.patch)).fold((0, 0), |(a, d), (ca, cd)| (a + ca, d + cd));
 
         let files_hash = hash(&files.join("\0"));
         if files_hash != self.files_hash {
             self.files_hash = files_hash;
             self.tree = FileTree::new(files.iter().map(String::as_str));
+            self.files = files;
             self.rebuild_rows();
         }
 
@@ -241,7 +251,22 @@ impl Workspace {
             self.save_approvals(cx);
         }
         self.changes = changes;
+        self.show_selected(cx);
         self.update_violations();
+        self.update_protection();
+    }
+
+    /// Recounts protected files per directory; call when files or rules change.
+    fn update_protection(&mut self) {
+        self.protection.clear();
+        for file in &self.files {
+            let protected = usize::from(self.guard.is_protected(file));
+            for dir in file_tree::ancestors(file) {
+                let (count, total) = self.protection.entry(dir.to_owned()).or_default();
+                *count += protected;
+                *total += 1;
+            }
+        }
     }
 
     fn update_violations(&mut self) {
@@ -322,7 +347,6 @@ impl Workspace {
         } else {
             let patch_hash = hash(&change.patch);
             self.reviewed.insert(path.to_owned(), patch_hash);
-            self.diff.update(cx, |diff, cx| diff.set_file_collapsed(path, true, cx));
         }
         cx.notify();
     }
@@ -347,18 +371,30 @@ impl Workspace {
     }
 
     /// Adds or removes a protection rule.
-    fn toggle_rule(&mut self, rule: &str, cx: &mut Context<Self>) {
-        let enabled = !self.guard.has_rule(rule);
-        match self.guard.with_rule(rule, enabled) {
+    /// Removes one rule, as written in `.difftower.toml`.
+    fn remove_rule(&mut self, rule: &str, cx: &mut Context<Self>) {
+        let guard = self.guard.with_rule(rule, false);
+        self.set_guard(guard, cx);
+    }
+
+    /// Protects or unprotects a file, or a directory with everything in it.
+    fn set_protected(&mut self, path: &str, is_dir: bool, protect: bool, cx: &mut Context<Self>) {
+        let guard = self.guard.with_protected(path, is_dir, protect);
+        self.set_guard(guard, cx);
+    }
+
+    fn set_guard(&mut self, guard: anyhow::Result<Guard>, cx: &mut Context<Self>) {
+        match guard {
             Ok(guard) => self.guard = guard,
             Err(err) => {
-                self.error = Some(format!("Invalid rule {rule}: {err}").into());
+                self.error = Some(format!("Invalid rule: {err}").into());
                 return;
             }
         }
         let rules = self.guard.patterns().to_vec();
         self.in_background("Could not save .difftower.toml", cx, move |backend| backend.save_rules(&rules));
         self.update_violations();
+        self.update_protection();
         cx.notify();
     }
 
@@ -370,15 +406,33 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Puts the selected file's current patch in the diff, or nothing. Leaves
+    /// the diff, and its scroll position, alone when that patch is unchanged.
+    fn show_selected(&mut self, cx: &mut Context<Self>) {
+        let change = self.selected.as_deref().and_then(|path| self.change(path)).filter(|_| self.preview.is_none());
+        let target = change.map(|c| (c.path.clone(), hash(&c.patch)));
+        if target == self.shown {
+            return;
+        }
+        let files = match change.map(|c| DiffFile::parse(&c.patch)) {
+            Some(Ok(files)) => files,
+            Some(Err(err)) => {
+                self.error = Some(format!("Could not parse the diff: {}", err.message()).into());
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        self.shown = target;
+        self.diff.update(cx, |diff, cx| diff.set_files(files, cx));
+    }
+
     /// Shows a changed file in the diff, or any other file in a preview.
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(path.to_owned());
         if self.change(path).is_some() {
             self.preview = None;
-            self.diff.update(cx, |diff, cx| {
-                diff.set_file_collapsed(path, false, cx);
-                diff.scroll_to_file(path, cx);
-            });
+            self._preview_task = None;
+            self.show_selected(cx);
         } else {
             self.open_preview(path, window, cx);
         }
@@ -415,11 +469,17 @@ impl Workspace {
     fn close_preview(&mut self, cx: &mut Context<Self>) {
         self.preview = None;
         self._preview_task = None;
+        self.show_selected(cx);
         cx.notify();
     }
 
     fn show_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
         self.tab = tab;
+        cx.notify();
+    }
+
+    fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.soft_wrap = !self.soft_wrap;
         cx.notify();
     }
 
@@ -492,6 +552,15 @@ impl Workspace {
                     })),
             )
             .child(
+                Button::new("wrap")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(Lucide::TextWrap))
+                    .selected(self.soft_wrap)
+                    .tooltip("Wrap long lines (Alt+Z)")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
+            )
+            .child(
                 Button::new("mode")
                     .small()
                     .ghost()
@@ -542,9 +611,7 @@ impl Workspace {
         } else {
             (Lucide::Shield, theme.muted_foreground, "No protected files".to_owned())
         };
-        let (additions, deletions) = self.diff.read(cx).files().iter().fold((0, 0), |(a, d), f| {
-            (a + f.additions(), d + f.deletions())
-        });
+        let (additions, deletions) = self.totals;
 
         h_flex()
             .h_7()
@@ -615,6 +682,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show_tab(SidebarTab::Changes, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_tab(SidebarTab::Files, cx)))
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))
+            .on_action(cx.listener(|this, _: &ToggleWrap, _, cx| this.toggle_wrap(cx)))
             .child(self.render_toolbar(cx))
             .child(
                 h_resizable("main")
@@ -630,6 +698,19 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
     }
+}
+
+/// Lines added and removed in a unified patch.
+fn line_counts(patch: &str) -> (usize, usize) {
+    patch.lines().fold((0, 0), |(added, removed), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (added + 1, removed)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
 }
 
 fn hash(text: &str) -> u64 {

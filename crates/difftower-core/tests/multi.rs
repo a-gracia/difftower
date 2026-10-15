@@ -80,6 +80,12 @@ fn keeps_rules_and_approvals_in_each_repository() {
     );
     assert!(backend.save_rules(&["notes/**".into()]).is_err());
 
+    // Exceptions keep their `!` in front of the repository's own path.
+    backend.save_rules(&["api/src/**".into(), "!api/src/main.rs".into()]).unwrap();
+    let api_config = fs::read_to_string(root.path().join("api/.difftower.toml")).unwrap();
+    assert!(api_config.contains("\"!src/main.rs\""), "{api_config}");
+    assert_eq!(backend.status().unwrap().rules, ["api/src/**", "!api/src/main.rs"]);
+
     backend.save_approvals("00000000000000aa\tweb/index.html\n").unwrap();
     assert_eq!(backend.status().unwrap().approvals, "00000000000000aa\tweb/index.html\n");
     assert!(!root.path().join("api/.git/difftower/approvals").exists());

@@ -2,6 +2,7 @@ use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::*;
 
 mod assets;
+mod file_icons;
 mod file_tree;
 mod home;
 mod open;

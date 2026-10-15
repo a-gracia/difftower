@@ -1,6 +1,5 @@
 use std::{collections::HashMap, rc::Rc};
 
-use difftower_core::file_rule;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _,
@@ -15,8 +14,8 @@ use super::Workspace;
 
 struct FileState {
     reviewed: bool,
-    /// Protected by a rule for exactly this file.
-    pinned: bool,
+    /// Protected by any rule.
+    protected: bool,
     /// Protected and changed without the user's approval.
     violated: bool,
     /// Protected, with the change accepted by the user.
@@ -35,7 +34,7 @@ impl Workspace {
     fn render_preview(&self, preview: &super::Preview, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let body = match (&preview.state, &preview.message) {
-            (Some(state), _) => Diff::new(state).header_visible(false).into_any_element(),
+            (Some(state), _) => Diff::new(state).header_visible(false).soft_wrap(self.soft_wrap).into_any_element(),
             (None, message) => div()
                 .size_full()
                 .flex()
@@ -80,7 +79,18 @@ impl Workspace {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::CircleCheck).large())
-.child("Working tree clean")
+                .child("Working tree clean")
+                .into_any_element();
+        }
+        if self.shown.is_none() {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .text_color(cx.theme().muted_foreground)
+                .child(Icon::new(IconName::File).large())
+                .child("Select a file to see its changes")
                 .into_any_element();
         }
 
@@ -90,7 +100,7 @@ impl Workspace {
                 .map(|c| {
                     let state = FileState {
                         reviewed: self.is_reviewed(c),
-                        pinned: self.guard.has_rule(&file_rule(&c.path)),
+                        protected: self.guard.is_protected(&c.path),
                         violated: self.violations.contains(&c.path),
                         accepted: self.accepted.contains(&c.path),
                     };
@@ -99,55 +109,51 @@ impl Workspace {
                 .collect(),
         );
         let this = cx.entity().downgrade();
-        let title_states = states.clone();
 
+        // Actions sit right after the file name, not at the end of the
+        // header: the header is as wide as the longest line, so its end can
+        // be scrolled out of view.
         Diff::new(&self.diff)
+            .soft_wrap(self.soft_wrap)
             .render_header_title_suffix(move |file, _, cx| {
-                let state = title_states.get(file.path().as_ref());
+                let path = file.path().to_string();
+                let state = states.get(&path);
+                let reviewed = state.is_some_and(|s| s.reviewed);
+                let protected = state.is_some_and(|s| s.protected);
                 let violated = state.is_some_and(|s| s.violated);
                 let accepted = state.is_some_and(|s| s.accepted);
-                div()
+                let (pin, revert, review, accept) = (this.clone(), this.clone(), this.clone(), this.clone());
+                let (pin_path, revert_path, review_path, accept_path) =
+                    (path.clone(), path.clone(), path.clone(), path.clone());
+                h_flex()
+                    .gap_1()
                     .when(violated, |el| {
                         el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(cx.theme().danger))
+                            .child(
+                                Button::new("accept")
+                                    .xsmall()
+                                    .success()
+                                    .icon(IconName::Check)
+                                    .label("Accept")
+                                    .tooltip("This change to a protected file was intended")
+                                    .on_click(move |_, _, cx| {
+                                        let paths = [accept_path.clone()];
+                                        accept.update(cx, |this, cx| this.accept(&paths, cx)).ok();
+                                    }),
+                            )
                     })
                     .when(accepted, |el| {
                         el.child(Icon::new(Lucide::ShieldCheck).xsmall().text_color(cx.theme().success))
                     })
-            })
-            .render_header_suffix(move |file, _, _| {
-                let path = file.path().to_string();
-                let state = states.get(&path);
-                let reviewed = state.is_some_and(|s| s.reviewed);
-                let pinned = state.is_some_and(|s| s.pinned);
-                let violated = state.is_some_and(|s| s.violated);
-                let (pin, revert, review, accept) = (this.clone(), this.clone(), this.clone(), this.clone());
-                let (pin_path, revert_path, review_path) = (path.clone(), path.clone(), path.clone());
-                let accept_path = path.clone();
-                h_flex()
-                    .gap_1()
-                    .when(violated, |el| {
-                        el.child(
-                            Button::new("accept")
-                                .xsmall()
-                                .success()
-                                .icon(IconName::Check)
-                                .label("Accept")
-                                .tooltip("This change to a protected file was intended")
-                                .on_click(move |_, _, cx| {
-                                    let paths = [accept_path.clone()];
-                                    accept.update(cx, |this, cx| this.accept(&paths, cx)).ok();
-                                }),
-                        )
-                    })
                     .child(
-                        Button::new("pin")
+                        Button::new("review")
                             .xsmall()
-                            .ghost()
-                            .icon(Icon::new(if pinned { Lucide::ShieldCheck } else { Lucide::Shield }))
-                            .tooltip(if pinned { "Unprotect file" } else { "Protect file from agents" })
+                            .when(reviewed, |b| b.success())
+                            .when(!reviewed, |b| b.outline())
+                            .icon(IconName::Check)
+                            .label("Reviewed")
                             .on_click(move |_, _, cx| {
-                                let rule = file_rule(&pin_path);
-                                pin.update(cx, |this, cx| this.toggle_rule(&rule, cx)).ok();
+                                review.update(cx, |this, cx| this.toggle_reviewed(&review_path, cx)).ok();
                             }),
                     )
                     .child(
@@ -162,14 +168,13 @@ impl Workspace {
                             }),
                     )
                     .child(
-                        Button::new("review")
+                        Button::new("pin")
                             .xsmall()
-                            .when(reviewed, |b| b.success())
-                            .when(!reviewed, |b| b.outline())
-                            .icon(IconName::Check)
-                            .label("Reviewed")
+                            .ghost()
+                            .icon(Icon::new(if protected { Lucide::ShieldCheck } else { Lucide::Shield }))
+                            .tooltip(if protected { "Unprotect file" } else { "Protect file from agents" })
                             .on_click(move |_, _, cx| {
-                                review.update(cx, |this, cx| this.toggle_reviewed(&review_path, cx)).ok();
+                                pin.update(cx, |this, cx| this.set_protected(&pin_path, false, !protected, cx)).ok();
                             }),
                     )
             })

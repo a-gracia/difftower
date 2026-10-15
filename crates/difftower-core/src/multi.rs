@@ -90,7 +90,10 @@ impl Backend for Multi {
             status.changes.extend(repo_status.changes);
             status.files.extend(repo_status.files.iter().map(|f| format!("{name}/{f}")));
             let dir = globset::escape(name);
-            status.rules.extend(repo_status.rules.iter().map(|r| format!("{dir}/{r}")));
+            status.rules.extend(repo_status.rules.iter().map(|rule| match rule.strip_prefix('!') {
+                Some(glob) => format!("!{dir}/{glob}"),
+                None => format!("{dir}/{rule}"),
+            }));
             if let Some(err) = repo_status.rules_error {
                 errors.push(format!("{name}: {err}"));
             }
@@ -125,13 +128,17 @@ impl Backend for Multi {
     fn save_rules(&self, rules: &[String]) -> Result<()> {
         let mut by_repo: Vec<Vec<String>> = vec![Vec::new(); self.repos.len()];
         for rule in rules {
+            let (bang, glob) = match rule.strip_prefix('!') {
+                Some(glob) => ("!", glob),
+                None => ("", rule.as_str()),
+            };
             let ix = self
                 .repos
                 .iter()
-                .position(|(name, _)| rule.starts_with(&format!("{}/", globset::escape(name))))
+                .position(|(name, _)| glob.starts_with(&format!("{}/", globset::escape(name))))
                 .with_context(|| format!("the rule {rule} must be inside one of the repositories"))?;
             let dir_len = globset::escape(&self.repos[ix].0).len() + 1;
-            by_repo[ix].push(rule[dir_len..].to_owned());
+            by_repo[ix].push(format!("{bang}{}", &glob[dir_len..]));
         }
         for ((_, repo), rules) in self.repos.iter().zip(by_repo) {
             if guard::load_rules(repo.root()).ok().as_ref() != Some(&rules) {

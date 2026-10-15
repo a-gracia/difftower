@@ -21,19 +21,28 @@ struct GuardConfig {
 }
 
 /// The set of protected paths of one repository.
+///
+/// Rules are globs relative to the repository root. As in `.gitignore`, a
+/// rule starting with `!` is an exception, and the last rule that matches a
+/// path decides whether it is protected.
 #[derive(Clone)]
 pub struct Guard {
     patterns: Vec<String>,
+    /// Whether each pattern is an exception (`!`).
+    negated: Vec<bool>,
     set: GlobSet,
 }
 
 impl Guard {
     pub fn new(patterns: Vec<String>) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
+        let mut negated = Vec::with_capacity(patterns.len());
         for pattern in &patterns {
-            builder.add(Glob::new(pattern)?);
+            let glob = pattern.strip_prefix('!');
+            negated.push(glob.is_some());
+            builder.add(Glob::new(glob.unwrap_or(pattern))?);
         }
-        Ok(Self { patterns, set: builder.build()? })
+        Ok(Self { patterns, negated, set: builder.build()? })
     }
 
     /// A guard that protects nothing.
@@ -46,12 +55,14 @@ impl Guard {
     }
 
     pub fn is_protected(&self, path: &str) -> bool {
-        self.set.is_match(path)
+        self.rule_for(path).is_some()
     }
 
-    /// Indices into [`Self::patterns`] of the rules that protect `path`.
-    pub fn rules_for(&self, path: &str) -> Vec<usize> {
-        self.set.matches(path)
+    /// The index into [`Self::patterns`] of the rule that protects `path`,
+    /// or `None` when nothing does or an exception wins.
+    pub fn rule_for(&self, path: &str) -> Option<usize> {
+        let last = self.set.matches(path).into_iter().max()?;
+        (!self.negated[last]).then_some(last)
     }
 
     pub fn has_rule(&self, pattern: &str) -> bool {
@@ -64,6 +75,30 @@ impl Guard {
         patterns.retain(|p| p != pattern);
         if enabled {
             patterns.push(pattern.to_owned());
+        }
+        Self::new(patterns)
+    }
+
+    /// This guard with a file, or a directory and everything in it, protected
+    /// or not. Rules for paths inside the target are dropped first, so the
+    /// result is the shortest rule list that does it: the target's own rule,
+    /// or an exception when an outer rule would still protect it.
+    pub fn with_protected(&self, target: &str, is_dir: bool, protect: bool) -> Result<Self> {
+        let escaped = globset::escape(target);
+        let inside = format!("{escaped}/");
+        let mut patterns: Vec<String> = self
+            .patterns
+            .iter()
+            .filter(|pattern| {
+                let glob = pattern.strip_prefix('!').unwrap_or(pattern);
+                glob != escaped && !(is_dir && glob.starts_with(&inside))
+            })
+            .cloned()
+            .collect();
+        let probe = if is_dir { inside } else { target.to_owned() };
+        if Self::new(patterns.clone())?.is_protected(&probe) != protect {
+            let rule = if is_dir { dir_rule(target) } else { file_rule(target) };
+            patterns.push(if protect { rule } else { format!("!{rule}") });
         }
         Self::new(patterns)
     }

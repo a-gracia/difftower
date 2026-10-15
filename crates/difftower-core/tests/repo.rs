@@ -128,8 +128,46 @@ fn guard_rules_for_files_and_dirs() {
     assert!(!guard.is_protected("src/w.rs"));
     assert!(guard.is_protected("db/migrations/001.sql"));
     assert!(guard.has_rule(&dir_rule("db")));
-    assert_eq!(guard.rules_for("db/x.sql"), [2]);
+    assert_eq!(guard.rule_for("db/x.sql"), Some(2));
     assert!(!guard.with_rule("tests/**", false).unwrap().is_protected("tests/spec.rs"));
+}
+
+#[test]
+fn exceptions_and_the_last_matching_rule_win() {
+    let guard = Guard::new(vec!["tests/**".into(), "!tests/scratch/**".into(), "tests/scratch/keep.rs".into()]).unwrap();
+    assert!(guard.is_protected("tests/a.rs"));
+    assert!(!guard.is_protected("tests/scratch/tmp.rs"));
+    assert!(guard.is_protected("tests/scratch/keep.rs"));
+    assert_eq!(guard.rule_for("tests/a.rs"), Some(0));
+    assert_eq!(guard.rule_for("tests/scratch/tmp.rs"), None);
+}
+
+#[test]
+fn protecting_and_unprotecting_paths_keeps_rules_minimal() {
+    let guard = Guard::empty().with_protected("tests", true, true).unwrap();
+    assert_eq!(guard.patterns(), ["tests/**"]);
+
+    // Unprotecting a file inside a protected folder adds an exception.
+    let guard = guard.with_protected("tests/flaky.rs", false, false).unwrap();
+    assert_eq!(guard.patterns(), ["tests/**", "!tests/flaky.rs"]);
+    assert!(!guard.is_protected("tests/flaky.rs"));
+    assert!(guard.is_protected("tests/ok.rs"));
+
+    // Protecting it again just drops the exception.
+    let back = guard.with_protected("tests/flaky.rs", false, true).unwrap();
+    assert_eq!(back.patterns(), ["tests/**"]);
+
+    // Protecting the folder again clears the rules inside it.
+    let full = guard.with_protected("tests", true, true).unwrap();
+    assert_eq!(full.patterns(), ["tests/**"]);
+
+    // Unprotecting a folder inside a protected one adds a folder exception.
+    let partial = full.with_protected("tests/fixtures", true, false).unwrap();
+    assert_eq!(partial.patterns(), ["tests/**", "!tests/fixtures/**"]);
+    assert!(!partial.is_protected("tests/fixtures/data.json"));
+
+    // Unprotecting the outer folder removes everything about it.
+    assert!(partial.with_protected("tests", true, false).unwrap().patterns().is_empty());
 }
 
 #[test]

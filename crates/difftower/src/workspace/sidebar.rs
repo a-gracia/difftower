@@ -1,9 +1,9 @@
 use std::ops::Range;
 
-use difftower_core::{ChangeStatus, dir_rule, file_rule};
+use difftower_core::ChangeStatus;
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex, v_flex,
 };
@@ -11,6 +11,14 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use super::{SidebarTab, Workspace};
+use crate::file_icons;
+
+// Sizes from VS Code's explorer and source control views: dense enough to
+// show the many files an agent touches at once.
+const ROW_HEIGHT: Pixels = px(22.);
+const NAME_SIZE: Pixels = px(13.);
+const DETAIL_SIZE: Pixels = px(12.);
+const INDENT: f32 = 8.;
 
 impl Workspace {
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -27,7 +35,7 @@ impl Workspace {
             .bg(theme.sidebar)
             .child(
                 h_flex()
-                    .h_9()
+                    .h_8()
                     .px_2()
                     .gap_1()
                     .border_b_1()
@@ -88,9 +96,9 @@ impl Workspace {
             .size_full()
             .child(
                 h_flex()
-                    .h_7()
+                    .h(ROW_HEIGHT)
                     .px_3()
-                    .text_xs()
+                    .text_size(DETAIL_SIZE)
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{reviewed}/{} reviewed", self.changes.len())),
             )
@@ -106,22 +114,23 @@ impl Workspace {
         let toggle = repo.to_owned();
         h_flex()
             .id(SharedString::from(format!("repo-{repo}")))
-            .mt_1()
-            .px_2()
-            .py_1()
-            .gap_1p5()
-            .text_xs()
+            .h(ROW_HEIGHT)
+            .pl_1()
+            .pr_3()
+            .gap_1()
+            .text_size(NAME_SIZE)
             .cursor_pointer()
             .hover(|el| el.bg(theme.list_hover))
             .child(
                 Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
-                    .xsmall()
+                    .small()
                     .text_color(theme.muted_foreground),
             )
             .child(div().flex_1().min_w_0().truncate().font_semibold().child(repo.to_owned()))
             .when(violated, |el| el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger)))
             .child(
                 div()
+                    .text_size(DETAIL_SIZE)
                     .text_color(theme.muted_foreground)
                     .child(format!("{reviewed}/{}", changes.len())),
             )
@@ -149,28 +158,30 @@ impl Workspace {
         let selected = self.selected.as_deref() == Some(&path);
         h_flex()
             .id(("change", ix))
-            .pl(if prefix.is_empty() { px(12.) } else { px(26.) })
+            .h(ROW_HEIGHT)
+            .pl(px(if prefix.is_empty() { 8. } else { 8. + 2. * INDENT + 4. }))
             .pr_3()
-            .py_1()
-            .gap_2()
-            .text_sm()
+            .gap_1p5()
+            .text_size(NAME_SIZE)
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.list_active))
             .hover(|el| el.bg(theme.list_hover))
             .when(is_reviewed, |el| el.opacity(0.5))
-            .child(div().w_3().text_xs().font_semibold().text_color(color).child(letter))
+            .child(file_icons::icon(&file))
             .child(
                 h_flex()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(div().flex_none().child(file))
-                    .child(div().ml_2().truncate().text_xs().text_color(theme.muted_foreground).child(dir)),
+                    .gap_1p5()
+                    .child(div().flex_none().text_color(color).child(file))
+                    .child(div().truncate().text_size(DETAIL_SIZE).text_color(theme.muted_foreground).child(dir)),
             )
             .when(self.violations.contains(&path), |el| {
-                el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(theme.danger))
+                el.child(Icon::new(Lucide::ShieldAlert).small().text_color(theme.danger))
             })
-            .when(is_reviewed, |el| el.child(Icon::new(IconName::Check).xsmall().text_color(theme.success)))
+            .when(is_reviewed, |el| el.child(Icon::new(IconName::Check).small().text_color(theme.success)))
+            .child(div().w_3().flex_none().text_size(DETAIL_SIZE).font_semibold().text_color(color).child(letter))
             .on_click(cx.listener(move |this, _, window, cx| this.open(&path, window, cx)))
             .into_any_element()
     }
@@ -191,13 +202,17 @@ impl Workspace {
         let theme = cx.theme();
         let row = &self.rows[ix];
         let path = row.path.clone();
-        let rule = if row.is_dir { dir_rule(&path) } else { file_rule(&path) };
-        let direct = self.guard.has_rule(&rule);
-        // A trailing slash makes `dir/**` rules of ancestors match a directory.
-        let protected = if row.is_dir {
-            direct || self.guard.is_protected(&format!("{path}/"))
+        // Like a checkbox: a folder is fully, partly or not protected.
+        let protection = if row.is_dir {
+            match self.protection.get(&path) {
+                Some(&(count, total)) if count == total && total > 0 => Protection::Full,
+                Some(&(count, _)) if count > 0 => Protection::Partial,
+                _ => Protection::None,
+            }
+        } else if self.guard.is_protected(&path) {
+            Protection::Full
         } else {
-            self.guard.is_protected(&path)
+            Protection::None
         };
         let violated = if row.is_dir {
             let prefix = format!("{path}/");
@@ -213,62 +228,63 @@ impl Workspace {
         };
         let selected = self.selected.as_deref() == Some(&path);
 
-        let (shield_icon, shield_color, tooltip) = if violated {
-            (Lucide::ShieldAlert, theme.danger, "Protected · modified by an agent")
-        } else if direct {
-            (Lucide::ShieldCheck, theme.success, "Protected · click to unprotect")
-        } else if protected {
-            (Lucide::ShieldCheck, theme.muted_foreground, "Protected by a parent folder rule")
-        } else {
-            (Lucide::Shield, theme.muted_foreground, if row.is_dir { "Protect folder" } else { "Protect file" })
+        let (shield_icon, shield_color, tooltip) = match (violated, protection) {
+            (true, _) => (Lucide::ShieldAlert, theme.danger, "Protected · modified by an agent"),
+            (false, Protection::Full) => (Lucide::ShieldCheck, theme.success, "Protected · click to unprotect"),
+            (false, Protection::Partial) => {
+                (Lucide::ShieldHalf, theme.success, "Partly protected · click to protect everything")
+            }
+            (false, Protection::None) => {
+                (Lucide::Shield, theme.muted_foreground, if row.is_dir { "Protect folder" } else { "Protect file" })
+            }
         };
-        let shield_visible = violated || protected;
-        let toggle_rule = rule.clone();
+        let shield_visible = violated || protection != Protection::None;
+        let (toggle_path, is_dir) = (path.clone(), row.is_dir);
+        // Partly protected folders become fully protected, like a checkbox.
+        let protect = protection != Protection::Full;
         let shield = Button::new(("shield", ix))
             .xsmall()
             .ghost()
             .icon(Icon::new(shield_icon).text_color(shield_color))
             .tooltip(tooltip)
-            .when(protected && !direct, |b| b.disabled(true))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.toggle_rule(&toggle_rule, cx);
+                this.set_protected(&toggle_path, is_dir, protect, cx);
             }));
 
-        let is_dir = row.is_dir;
         h_flex()
             .id(("tree-row", ix))
             .group("tree-row")
             .w_full()
-            .h_7()
-            .pl(px(8. + row.depth as f32 * 14.))
+            .h(ROW_HEIGHT)
+            .pl(px(4. + row.depth as f32 * INDENT))
             .pr_1()
-            .gap_1p5()
-            .text_sm()
+            .gap_1()
+            .text_size(NAME_SIZE)
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.list_active))
             .hover(|el| el.bg(theme.list_hover))
             .child(
-                div().w_3p5().flex_none().when(is_dir, |el| {
+                div().w_4().flex_none().when(is_dir, |el| {
                     el.child(
                         Icon::new(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight })
-                            .xsmall()
+                            .small()
                             .text_color(theme.muted_foreground),
                     )
                 }),
             )
-            .child(
-                Icon::new(match (is_dir, row.expanded) {
-                    (true, true) => IconName::FolderOpen,
-                    (true, false) => IconName::FolderClosed,
-                    (false, _) => IconName::File,
-                })
-                .xsmall()
-                .text_color(theme.muted_foreground),
-            )
+            .child(if is_dir {
+                Icon::new(if row.expanded { IconName::FolderOpen } else { IconName::FolderClosed })
+                    .small()
+                    .flex_none()
+                    .text_color(theme.muted_foreground)
+                    .into_any_element()
+            } else {
+                file_icons::icon(&row.name).into_any_element()
+            })
             .child(div().flex_1().min_w_0().truncate().text_color(name_color).child(row.name.clone()))
             .when_some(self.changed_dirs.get(&path).filter(|_| is_dir), |el, count| {
-                el.child(div().text_xs().text_color(theme.muted_foreground).child(count.to_string()))
+                el.child(div().text_size(DETAIL_SIZE).text_color(theme.muted_foreground).child(count.to_string()))
             })
             .child(
                 div()
@@ -303,146 +319,211 @@ impl Workspace {
                 .child("Use the shield next to a file or folder in the Files tab, or add globs to .difftower.toml.")
                 .into_any_element();
         }
-
-        let rules = self.guard.patterns().iter().enumerate().map(|(ix, pattern)| {
-            let under_rule = |paths: &[String]| -> Vec<String> {
-                paths.iter().filter(|p| self.guard.rules_for(p).contains(&ix)).cloned().collect()
-            };
-            let modified = under_rule(&self.violations);
-            let accepted = under_rule(&self.accepted);
-            let ok = modified.is_empty();
-            let (status, status_color) = if !ok {
-                (format!("{} modified", modified.len()), theme.danger)
-            } else if !accepted.is_empty() {
-                (format!("{} accepted", accepted.len()), theme.success)
-            } else {
-                ("intact".to_owned(), theme.muted_foreground)
-            };
-            let remove_rule = pattern.clone();
-            let (accept_rule, revert_rule) = (modified.clone(), modified.clone());
-            v_flex()
-                .px_3()
-                .py_2()
-                .gap_1()
-                .border_b_1()
-                .border_color(theme.border)
-                .when(!ok, |el| el.bg(theme.danger.opacity(0.08)))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Icon::new(if ok { Lucide::ShieldCheck } else { Lucide::ShieldAlert })
-                                .small()
-                                .text_color(if ok { theme.success } else { theme.danger }),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().text_sm().child(pattern.clone()))
-                        .child(div().flex_none().text_xs().text_color(status_color).child(status))
-                        .child(
-                            Button::new(("remove-rule", ix))
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Close)
-                                .tooltip("Stop protecting")
-                                .on_click(cx.listener(move |this, _, _, cx| this.toggle_rule(&remove_rule, cx))),
-                        ),
-                )
-                .children(modified.into_iter().enumerate().map(|(file_ix, path)| {
-                    let id = ix * 10_000 + file_ix;
-                    let (open_path, accept_path, revert_path) = (path.clone(), path.clone(), path.clone());
-                    h_flex()
-                        .pl_6()
-                        .gap_1()
-                        .text_xs()
-                        .child(
-                            div()
-                                .id(("violation", id))
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .cursor_pointer()
-                                .text_color(theme.danger)
-                                .hover(|el| el.underline())
-                                .child(path)
-                                .on_click(cx.listener(move |this, _, window, cx| this.open(&open_path, window, cx))),
-                        )
-                        .child(
-                            Button::new(("accept-file", id))
-                                .xsmall()
-                                .ghost()
-                                .icon(Icon::new(IconName::Check).text_color(theme.success))
-                                .tooltip("Accept this change")
-                                .on_click(cx.listener(move |this, _, _, cx| this.accept(std::slice::from_ref(&accept_path), cx))),
-                        )
-                        .child(
-                            Button::new(("revert-file", id))
-                                .xsmall()
-                                .ghost()
-                                .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
-                                .tooltip("Revert this file")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.revert(std::slice::from_ref(&revert_path), window, cx)
-                                })),
-                        )
-                }))
-                .children(accepted.into_iter().enumerate().map(|(file_ix, path)| {
-                    let id = ix * 10_000 + file_ix;
-                    let (open_path, revoke_path) = (path.clone(), path.clone());
-                    h_flex()
-                        .pl_6()
-                        .gap_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(Icon::new(IconName::Check).xsmall().text_color(theme.success))
-                        .child(
-                            div()
-                                .id(("accepted", id))
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .cursor_pointer()
-                                .hover(|el| el.underline())
-                                .child(path)
-                                .on_click(cx.listener(move |this, _, window, cx| this.open(&open_path, window, cx))),
-                        )
-                        .child(
-                            Button::new(("revoke", id))
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Close)
-                                .tooltip("Undo acceptance")
-                                .on_click(cx.listener(move |this, _, _, cx| this.revoke(&revoke_path, cx))),
-                        )
-                }))
-                .when(!ok, |el| {
-                    el.child(
-                        h_flex()
-                            .pl_6()
-                            .pt_1()
-                            .gap_1()
-                            .child(
-                                Button::new(("accept-rule", ix))
-                                    .xsmall()
-                                    .success()
-                                    .icon(IconName::Check)
-                                    .label("Accept")
-                                    .on_click(cx.listener(move |this, _, _, cx| this.accept(&accept_rule, cx))),
-                            )
-                            .child(
-                                Button::new(("revert-rule", ix))
-                                    .xsmall()
-                                    .danger()
-                                    .icon(IconName::Undo2)
-                                    .label("Revert")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.revert(&revert_rule, window, cx)
-                                    })),
-                            ),
-                    )
-                })
-        });
-
+        let rules: Vec<AnyElement> = (0..self.guard.patterns().len()).map(|ix| self.render_rule(ix, cx)).collect();
         v_flex().id("protected").size_full().overflow_y_scroll().children(rules).into_any_element()
     }
+
+    fn render_rule(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        const LISTED: usize = 200;
+        let theme = cx.theme();
+        let pattern = self.guard.patterns()[ix].clone();
+        let remove_rule = pattern.clone();
+        let remove = Button::new(("remove-rule", ix))
+            .xsmall()
+            .ghost()
+            .icon(IconName::Close)
+            .tooltip("Remove this rule")
+            .on_click(cx.listener(move |this, _, _, cx| this.remove_rule(&remove_rule, cx)));
+
+        if let Some(glob) = pattern.strip_prefix('!') {
+            return h_flex()
+                .h(ROW_HEIGHT)
+                .px_3()
+                .gap_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .text_size(NAME_SIZE)
+                .text_color(theme.muted_foreground)
+                .child(Icon::new(Lucide::ShieldOff).small())
+                .child(div().text_size(DETAIL_SIZE).child("except"))
+                .child(div().flex_1().min_w_0().truncate().child(glob.to_owned()))
+                .child(remove)
+                .into_any_element();
+        }
+
+        let covered: Vec<&String> = self.files.iter().filter(|f| self.guard.rule_for(f) == Some(ix)).collect();
+        let modified: Vec<String> =
+            self.violations.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
+        let accepted: Vec<String> =
+            self.accepted.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
+        let ok = modified.is_empty();
+        let expanded = self.expanded_rules.contains(&pattern);
+        let files_label = format!("{} file{}", covered.len(), if covered.len() == 1 { "" } else { "s" });
+        let (status, status_color) = if !ok {
+            (format!("{} modified", modified.len()), theme.danger)
+        } else if !accepted.is_empty() {
+            (format!("{} accepted", accepted.len()), theme.success)
+        } else {
+            (files_label.clone(), theme.muted_foreground)
+        };
+        let toggle = pattern.clone();
+        let (accept_rule, revert_rule) = (modified.clone(), modified.clone());
+
+        let header = h_flex()
+            .id(("rule", ix))
+            .h(ROW_HEIGHT)
+            .pl_1()
+            .pr_3()
+            .gap_1()
+            .text_size(NAME_SIZE)
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.list_hover))
+            .child(
+                Icon::new(if expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(
+                Icon::new(if ok { Lucide::ShieldCheck } else { Lucide::ShieldAlert })
+                    .small()
+                    .text_color(if ok { theme.success } else { theme.danger }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(pattern.clone()))
+            .child(div().flex_none().text_size(DETAIL_SIZE).text_color(status_color).child(status))
+            .child(remove)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.expanded_rules.remove(&toggle) {
+                    this.expanded_rules.insert(toggle.clone());
+                }
+                cx.notify();
+            }));
+
+        // Modified and accepted files always show; the rest when expanded.
+        let listed: Vec<&String> = if expanded {
+            covered.iter().copied().take(LISTED).collect()
+        } else {
+            covered.iter().copied().filter(|f| modified.contains(f) || accepted.contains(f)).collect()
+        };
+        let rows = listed.into_iter().enumerate().map(|(file_ix, path)| {
+            let id = ix * 100_000 + file_ix;
+            let is_modified = modified.contains(path);
+            let is_accepted = accepted.contains(path);
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let (open_path, accept_path, revert_path, revoke_path, unprotect_path) =
+                (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
+            h_flex()
+                .h(ROW_HEIGHT)
+                .pl(px(8. + 3. * INDENT))
+                .pr_3()
+                .gap_1p5()
+                .text_size(NAME_SIZE)
+                .hover(|el| el.bg(theme.list_hover))
+                .child(file_icons::icon(name))
+                .child(
+                    div()
+                        .id(("covered", id))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .when(is_modified, |el| el.text_color(theme.danger))
+                        .hover(|el| el.underline())
+                        .child(path.clone())
+                        .on_click(cx.listener(move |this, _, window, cx| this.open(&open_path, window, cx))),
+                )
+                .when(is_modified, |el| {
+                    el.child(
+                        Button::new(("accept-file", id))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Check).text_color(theme.success))
+                            .tooltip("Accept this change")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.accept(std::slice::from_ref(&accept_path), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(("revert-file", id))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
+                            .tooltip("Revert this file")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.revert(std::slice::from_ref(&revert_path), window, cx)
+                            })),
+                    )
+                })
+                .when(is_accepted, |el| {
+                    el.child(Icon::new(IconName::Check).small().text_color(theme.success)).child(
+                        Button::new(("revoke", id))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Undo2)
+                            .tooltip("Undo acceptance")
+                            .on_click(cx.listener(move |this, _, _, cx| this.revoke(&revoke_path, cx))),
+                    )
+                })
+                .child(
+                    Button::new(("unprotect", id))
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(Lucide::ShieldOff).text_color(theme.muted_foreground))
+                        .tooltip("Stop protecting this file")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_protected(&unprotect_path, false, false, cx)
+                        })),
+                )
+        });
+
+        v_flex()
+            .border_b_1()
+            .border_color(theme.border)
+            .when(!ok, |el| el.bg(theme.danger.opacity(0.08)))
+            .child(header)
+            .children(rows)
+            .when(expanded && covered.len() > LISTED, |el| {
+                el.child(
+                    div()
+                        .h(ROW_HEIGHT)
+                        .pl(px(8. + 3. * INDENT))
+                        .text_size(DETAIL_SIZE)
+                        .text_color(theme.muted_foreground)
+                        .child(format!("and {} more", covered.len() - LISTED)),
+                )
+            })
+            .when(!ok, |el| {
+                el.child(
+                    h_flex()
+                        .pl(px(8. + 3. * INDENT))
+                        .py_1()
+                        .gap_1()
+                        .child(
+                            Button::new(("accept-rule", ix))
+                                .xsmall()
+                                .success()
+                                .icon(IconName::Check)
+                                .label("Accept")
+                                .on_click(cx.listener(move |this, _, _, cx| this.accept(&accept_rule, cx))),
+                        )
+                        .child(
+                            Button::new(("revert-rule", ix))
+                                .xsmall()
+                                .danger()
+                                .icon(IconName::Undo2)
+                                .label("Revert")
+                                .on_click(cx.listener(move |this, _, window, cx| this.revert(&revert_rule, window, cx))),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Protection {
+    None,
+    Partial,
+    Full,
 }
 
 /// The repository a path belongs to in a multi-repository workspace.
