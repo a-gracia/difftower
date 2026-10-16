@@ -15,7 +15,7 @@ provides=('difftower')
 conflicts=('difftower')
 options=('!strip' '!debug')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/a-gracia/difftower/releases/download/v$pkgver/difftower-x86_64-unknown-linux-gnu.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('d7af9a4de51a2da85632b50edbe099aacd439bc16487a46cc43381366a14fae6')
 
 package() {
     cd difftower-x86_64-unknown-linux-gnu
