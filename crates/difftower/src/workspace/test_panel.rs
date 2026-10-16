@@ -174,8 +174,14 @@ impl Tests {
         super::session::write_state("tests", key, &stored);
     }
 
+    /// Whether the run in progress was asked for `id`. Running all of a
+    /// suite covers tests added since it was listed, such as one an agent
+    /// just wrote.
     fn in_current_job(&self, id: &str) -> bool {
-        self.current.as_ref().is_some_and(|job| job.ids.iter().any(|i| i == id))
+        self.current.as_ref().is_some_and(|job| match job.target {
+            TestTarget::All => job.repo.is_empty() || id.starts_with(&format!("{}/", job.repo)),
+            _ => job.ids.iter().any(|i| i == id),
+        })
     }
 
     pub fn running(&self) -> bool {
