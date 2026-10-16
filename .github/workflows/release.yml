@@ -1,0 +1,66 @@
+# Builds the Linux binary on a version tag (`git tag v0.1.0 && git push --tags`)
+# and publishes it, with its checksum, as a GitHub release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # The oldest supported Ubuntu: its glibc sets the oldest distribution
+    # the binary runs on.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld pkg-config \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libx11-xcb-dev \
+            libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p difftower
+
+      - name: Check the binary runs
+        run: ./target/release/difftower --version
+
+      - name: Package
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_REF_TYPE" != tag ]; then version="0.0.0-dev"; fi
+          name=difftower-x86_64-unknown-linux-gnu
+          mkdir -p "dist/$name"
+          cp target/release/difftower packaging/difftower.desktop packaging/difftower.svg \
+            LICENSE-MIT LICENSE-APACHE README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: difftower-linux
+          path: dist/*.tar.gz*
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --title "Difftower ${{ steps.package.outputs.version }}" \
+            --generate-notes

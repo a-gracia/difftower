@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Difftower
+GenericName=Agent Supervisor
+Comment=A control tower for coding agents: live diff, protected files and tests
+Exec=difftower %f
+Icon=difftower
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=diff;git;agent;review;ssh;
+StartupWMClass=difftower
