@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Difftower — a control tower for coding agents</title>
+<meta name="description" content="Not an IDE. A fast, native window that shows everything your coding agents change, guards the files they must not touch and runs your tests, locally or over SSH. Free and open source.">
+<meta name="theme-color" content="#0d1117">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="canonical" href="https://difftower.com/">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://difftower.com/">
+<meta property="og:title" content="Difftower — a control tower for coding agents">
+<meta property="og:description" content="Not an IDE. Watch every change your agents make, guard the files they must not touch, run your tests. Native, fast, open source.">
+<meta property="og:image" content="https://difftower.com/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-soft: #11161d;
+    --panel: #161b22;
+    --line: #262c36;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --faint: #6e7681;
+    --blue: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --green-bg: rgba(63, 185, 80, 0.13);
+    --red-bg: rgba(248, 81, 73, 0.13);
+    --radius: 12px;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; }
+  code, pre { font-family: var(--mono); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+  /* Navigation */
+  nav { position: sticky; top: 0; z-index: 10; background: rgba(13, 17, 23, 0.82); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  nav .wrap { display: flex; align-items: center; gap: 28px; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.01em; }
+  .brand img { width: 26px; height: 26px; }
+  nav .links { display: flex; gap: 22px; margin-left: auto; font-size: 14px; color: var(--muted); }
+  nav .links a:hover { color: var(--text); }
+  .gh { display: inline-flex; align-items: center; gap: 8px; }
+
+  /* Hero */
+  .hero { padding: 88px 0 40px; text-align: center; position: relative; overflow: hidden; }
+  .hero::before {
+    content: ""; position: absolute; inset: -40% -10% auto; height: 620px; z-index: -1;
+    background: radial-gradient(closest-side, rgba(88, 166, 255, 0.16), transparent 70%);
+  }
+  .eyebrow { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; background: var(--bg-soft); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(63, 185, 80, 0.2); }
+  h1 { font-size: clamp(38px, 6.4vw, 68px); line-height: 1.04; letter-spacing: -0.035em; margin: 22px auto 18px; max-width: 18ch; font-weight: 720; }
+  h1 .accent { color: var(--blue); }
+  .lede { font-size: clamp(17px, 2.1vw, 20px); color: var(--muted); max-width: 640px; margin: 0 auto; }
+  .lede strong { color: var(--text); font-weight: 560; }
+
+  .install {
+    display: inline-flex; align-items: center; gap: 14px; margin: 34px auto 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 10px 10px 18px;
+    font-family: var(--mono); font-size: 15px; max-width: 100%;
+  }
+  .install .prompt { color: var(--faint); user-select: none; }
+  .install code { white-space: nowrap; overflow-x: auto; }
+  .copy {
+    flex: none; border: 1px solid var(--line); background: var(--bg-soft); color: var(--muted);
+    border-radius: 7px; padding: 6px 12px; font: 13px var(--sans); cursor: pointer;
+  }
+  .copy:hover { color: var(--text); border-color: var(--faint); }
+  .ctas { display: flex; gap: 12px; justify-content: center; margin-top: 22px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 20px; border-radius: 9px; font-weight: 560; font-size: 15px; border: 1px solid var(--line); }
+  .btn.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .btn.primary:hover { background: #fff; }
+  .btn.ghost:hover { border-color: var(--faint); }
+  .btn .heart { color: #db61a2; }
+  .fine { margin-top: 16px; font-size: 13px; color: var(--faint); }
+
+  /* App mock */
+  .shot { margin: 56px auto 0; max-width: 1060px; }
+  .window {
+    border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0a0d12;
+    box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.02);
+    text-align: left; font-size: 12.5px;
+  }
+  .bar { display: flex; align-items: center; gap: 10px; white-space: nowrap; height: 38px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .bar img { width: 16px; }
+  .bar b { font-weight: 600; }
+  .chip { font-size: 11px; color: var(--muted); background: #21262d; border-radius: 5px; padding: 1px 7px; }
+  .bar .sp { flex: 1; }
+  .bar .run { color: var(--green); font-size: 12px; }
+  .panes { display: grid; grid-template-columns: 236px 1fr 64px 290px; height: 380px; }
+  .side { border-right: 1px solid var(--line); background: #0f141a; padding: 8px 0; overflow: hidden; }
+  .tabs { display: flex; gap: 2px; white-space: nowrap; padding: 0 8px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px; color: var(--muted); font-size: 11.5px; }
+  .tabs span { padding: 2px 7px; border-radius: 5px; }
+  .tabs .on { background: #21262d; color: var(--text); }
+  .row { display: flex; align-items: center; gap: 7px; padding: 3px 12px; white-space: nowrap; }
+  .row .n { font-weight: 500; }
+  .row .d { color: var(--faint); overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+  .row .c { margin-left: auto; font-size: 11px; }
+  .row.sel { background: rgba(88, 166, 255, 0.12); }
+  .m { color: var(--yellow); } .a { color: var(--green); } .r { color: var(--red); }
+  .diff { font-family: var(--mono); font-size: 12px; overflow: hidden; border-right: 1px solid var(--line); }
+  .diff .head { display: flex; gap: 10px; padding: 7px 12px; border-bottom: 1px solid var(--line); font-family: var(--sans); font-size: 12px; color: var(--muted); }
+  .diff .head b { color: var(--text); font-weight: 560; }
+  .ln { display: grid; grid-template-columns: 34px 14px 1fr; padding-right: 10px; line-height: 19px; white-space: pre; }
+  .ln i { color: var(--faint); font-style: normal; text-align: right; padding-right: 8px; }
+  .ln.add { background: var(--green-bg); } .ln.add u { color: var(--green); }
+  .ln.del { background: var(--red-bg); } .ln.del u { color: var(--red); }
+  .ln u { text-decoration: none; }
+  .k { color: #ff7b72; } .f { color: #d2a8ff; } .s { color: #a5d6ff; } .nm { color: #79c0ff; } .cm { color: var(--faint); }
+  .mini { position: relative; background: #0b0f14; border-right: 1px solid var(--line); }
+  .mini span { position: absolute; left: 8px; height: 2px; border-radius: 1px; background: rgba(230, 237, 243, 0.32); }
+  .mini .view { position: absolute; left: 0; right: 0; top: 14%; height: 36%; background: rgba(230, 237, 243, 0.07); }
+  .term { background: #0a0d12; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 19px; color: #c9d1d9; overflow: hidden; }
+  .term .p { color: var(--green); }
+  .term .q { color: var(--blue); }
+  .status { display: flex; gap: 18px; white-space: nowrap; overflow: hidden; align-items: center; height: 30px; padding: 0 14px; font-size: 11.5px; border-top: 1px solid var(--red); background: rgba(248, 81, 73, 0.15); color: var(--muted); }
+  .status .alert { color: var(--red); font-weight: 600; }
+  .status .sp { flex: 1; }
+  .caption { text-align: center; color: var(--faint); font-size: 13px; margin-top: 14px; }
+
+  /* Sections */
+  section { padding: 96px 0 0; }
+  .kicker { color: var(--blue); font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+  h2 { font-size: clamp(28px, 3.6vw, 40px); letter-spacing: -0.025em; line-height: 1.12; margin: 10px 0 14px; max-width: 22ch; }
+  .sub { color: var(--muted); max-width: 640px; font-size: 17px; margin: 0; }
+
+  .pitch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 40px; }
+  .pitch div { border-top: 2px solid var(--line); padding-top: 16px; }
+  .pitch b { display: block; font-size: 18px; margin-bottom: 6px; letter-spacing: -0.01em; }
+  .pitch p { margin: 0; color: var(--muted); font-size: 15px; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 40px; }
+  .card { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
+  .card svg { width: 22px; height: 22px; color: var(--blue); }
+  .card h3 { margin: 14px 0 6px; font-size: 17px; letter-spacing: -0.01em; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  .remote { display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center; }
+  .terminal-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px 24px; font-family: var(--mono); font-size: 14px; line-height: 1.9; overflow-x: auto; }
+  .terminal-card .p { color: var(--faint); }
+  .stats { display: flex; gap: 36px; margin-top: 30px; flex-wrap: wrap; }
+  .stats b { display: block; font-size: 30px; letter-spacing: -0.03em; }
+  .stats span { color: var(--muted); font-size: 14px; }
+
+  .ways { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 36px; }
+  .way { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+  .way h3 { margin: 0 0 4px; font-size: 16px; }
+  .way p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+  .way pre { margin: 0; background: #0a0d12; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 13px; overflow-x: auto; white-space: pre; }
+  .req { color: var(--faint); font-size: 14px; margin-top: 18px; }
+
+  .sponsor { margin: 96px 0 0; border: 1px solid var(--line); border-radius: 16px; padding: 44px; background: linear-gradient(135deg, rgba(219, 97, 162, 0.08), rgba(88, 166, 255, 0.06)); display: flex; gap: 32px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .sponsor h2 { margin: 0 0 8px; font-size: 28px; }
+  .sponsor p { margin: 0; color: var(--muted); max-width: 560px; }
+
+  footer { margin-top: 96px; border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--faint); font-size: 14px; }
+  footer .wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  footer .sp { flex: 1; }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 900px) {
+    .panes { grid-template-columns: 180px 1fr 0 0; }
+    .mini, .term { display: none; }
+    .grid, .pitch, .ways { grid-template-columns: 1fr; }
+    .remote { grid-template-columns: 1fr; gap: 28px; }
+    nav .links .hide-sm { display: none; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 16px; }
+    .hero { padding-top: 56px; }
+    .panes { grid-template-columns: 1fr; height: 300px; }
+    .side { display: none; }
+    .bar .chip, .status span:not(.alert):not(.r) { display: none; }
+    .install { font-size: 13px; }
+    .sponsor { padding: 28px; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="icon.svg" alt="">Difftower</a>
+    <div class="links">
+      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#remote">SSH</a>
+      <a href="#install">Install</a>
+      <a class="gh" href="https://github.com/a-gracia/difftower">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot"></span>Free and open source · Linux</span>
+    <h1>A control tower for your <span class="accent">coding agents</span>.</h1>
+    <p class="lede">Not an IDE. <strong>Agents write the code now; you supervise it.</strong> Difftower shows every change they make as they make it, guards the files they must not touch, and runs your tests — on your machine or on a server over SSH.</p>
+    <div class="install">
+      <span class="prompt">$</span><code id="cmd">curl -fsSL https://difftower.com/install.sh | sh</code>
+      <button class="copy" data-copy="cmd">Copy</button>
+    </div>
+    <div class="ctas">
+      <a class="btn primary" href="https://github.com/a-gracia/difftower">Star on GitHub</a>
+      <a class="btn ghost" href="https://github.com/sponsors/a-gracia"><span class="heart">♥</span> Sponsor</a>
+    </div>
+    <p class="fine">Rust + GPUI · native and GPU-rendered · no telemetry · macOS soon</p>
+
+    <div class="shot" aria-label="Difftower's window: changed files, a diff, a minimap and an agent in the terminal">
+      <div class="window">
+        <div class="bar">
+          <img src="icon.svg" alt=""><b>billing</b><span class="chip">me@devbox</span><span class="chip">vs HEAD</span>
+          <span class="sp"></span><span class="run">▶ Run tests</span><span class="chip">Unified</span>
+        </div>
+        <div class="panes">
+          <div class="side">
+            <div class="tabs"><span class="on">Changes 4</span><span>Files</span><span>Protected</span><span>Tests</span></div>
+            <div class="row sel"><span class="n m">invoice.ts</span><span class="d">src/billing/</span><span class="c a">+9</span><span class="c r">−3</span></div>
+            <div class="row"><span class="n m">tax.ts</span><span class="d">src/billing/</span><span class="c a">+4</span><span class="c r">−1</span></div>
+            <div class="row"><span class="n a">rounding.ts</span><span class="d">src/money/</span><span class="c a">+22</span></div>
+            <div class="row"><span class="n r">invoice.test.ts</span><span class="d">tests/</span><span class="c r">🛡</span></div>
+          </div>
+          <div class="diff">
+            <div class="head"><b>src/billing/invoice.ts</b><span class="sp"></span><span>+9 −3</span></div>
+            <div class="ln"><i>12</i><u> </u><span><span class="k">import</span> { roundHalfEven } <span class="k">from</span> <span class="s">"../money/rounding"</span>;</span></div>
+            <div class="ln"><i>13</i><u> </u><span> </span></div>
+            <div class="ln"><i>14</i><u> </u><span><span class="k">export function</span> <span class="f">total</span>(lines: <span class="nm">Line</span>[]): <span class="nm">Money</span> {</span></div>
+            <div class="ln del"><i>15</i><u>−</u><span>  <span class="k">const</span> sum = lines.<span class="f">reduce</span>((a, l) => a + l.price * l.qty, <span class="nm">0</span>);</span></div>
+            <div class="ln del"><i>16</i><u>−</u><span>  <span class="k">return</span> Math.<span class="f">round</span>(sum * <span class="nm">100</span>) / <span class="nm">100</span>;</span></div>
+            <div class="ln add"><i>15</i><u>+</u><span>  <span class="k">const</span> cents = lines.<span class="f">map</span>((l) => <span class="f">toCents</span>(l.price) * l.qty);</span></div>
+            <div class="ln add"><i>16</i><u>+</u><span>  <span class="k">const</span> sum = cents.<span class="f">reduce</span>((a, c) => a + c, <span class="nm">0</span>);</span></div>
+            <div class="ln add"><i>17</i><u>+</u><span>  <span class="k">return</span> <span class="f">fromCents</span>(<span class="f">roundHalfEven</span>(sum));</span></div>
+            <div class="ln"><i>18</i><u> </u><span>}</span></div>
+            <div class="ln"><i>19</i><u> </u><span> </span></div>
+            <div class="ln"><i>20</i><u> </u><span><span class="cm">// Taxes apply per line, before the total.</span></span></div>
+            <div class="ln"><i>21</i><u> </u><span><span class="k">export function</span> <span class="f">withTax</span>(line: <span class="nm">Line</span>, rate: <span class="nm">number</span>) {</span></div>
+            <div class="ln add"><i>22</i><u>+</u><span>  <span class="k">if</span> (rate &lt; <span class="nm">0</span>) <span class="k">throw new</span> <span class="nm">RangeError</span>(<span class="s">"negative tax rate"</span>);</span></div>
+            <div class="ln"><i>23</i><u> </u><span>  <span class="k">return</span> { ...line, price: line.price * (<span class="nm">1</span> + rate) };</span></div>
+            <div class="ln"><i>24</i><u> </u><span>}</span></div>
+          </div>
+          <div class="mini" aria-hidden="true"></div>
+          <div class="term">
+            <div><span class="p">me@devbox</span>:<span class="q">~/billing</span>$ claude</div>
+            <div>&gt; totals are off by a cent sometimes,</div>
+            <div>&nbsp; fix the rounding</div>
+            <div style="color:var(--muted)">● Reading src/billing/invoice.ts</div>
+            <div style="color:var(--muted)">● Editing src/billing/invoice.ts</div>
+            <div style="color:var(--muted)">● Creating src/money/rounding.ts</div>
+            <div style="color:var(--red)">● Editing tests/invoice.test.ts</div>
+            <div style="color:var(--muted)">● Running the tests…</div>
+          </div>
+        </div>
+        <div class="status">
+          <span class="alert">🛡 1 protected file modified</span><span>↺ Revert</span>
+          <span class="r">✕ 2 tests failed</span><span class="sp"></span><span>4 files <span class="a">+35</span> <span class="r">−4</span></span>
+        </div>
+      </div>
+      <p class="caption">The agent edited a test it was not supposed to touch. You see it the moment it happens.</p>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <section>
+    <span class="kicker">Why</span>
+    <h2>You are not editing code anymore. You are reviewing it.</h2>
+    <p class="sub">Editors were built for typing. When an agent writes the code, what you need is to see what it changed, stop it from touching what it must not, and know whether the tests still pass.</p>
+    <div class="pitch">
+      <div><b>See everything</b><p>Every file that differs from HEAD, live, with the whole file around each change.</p></div>
+      <div><b>Guard what matters</b><p>Protect tests, migrations or lockfiles. The status bar turns red the moment an agent touches one.</p></div>
+      <div><b>Trust, then commit</b><p>Run the tests the change affects. There is nothing to approve: you accept a change by committing it.</p></div>
+    </div>
+  </section>
+
+  <section id="features">
+    <span class="kicker">Features</span>
+    <h2>Small, fast, and only what supervision needs.</h2>
+    <div class="grid">
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
+        <h3>Live diff against HEAD</h3>
+        <p>Untracked files included, updated as the agent writes. Unified or split, syntax highlighted, with a minimap to find your way.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <h3>Protected files</h3>
+        <p>Shield a file or folder from the tree. Rules live in <code>.difftower.toml</code>, so the team shares them. Revert in one click.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6L4 20a1 1 0 0 0 .9 1.5h14.2A1 1 0 0 0 20 20L15 8V2M8 2h8M7 15h10"/></svg>
+        <h3>Your tests, one click away</h3>
+        <p>pytest, vitest and Rails, found on their own. Run all, a folder, a file, the failed ones or the ones the change affects.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 9l3 3-3 3M12 15h6"/></svg>
+        <h3>A terminal for the agent</h3>
+        <p>Run Claude Code, Codex or any CLI agent right next to its diff, in the repository, local or remote.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <h3>Many repositories, one window</h3>
+        <p>Open a folder of repositories and see all of them together, each with its own rules and tests.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        <h3>Native and fast</h3>
+        <p>Written in Rust on GPUI, the framework behind Zed. Rendered on the GPU, starts at once, no Electron.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="remote">
+    <div class="remote">
+      <div>
+        <span class="kicker">Over SSH</span>
+        <h2>Your agents run on a server. So does Difftower.</h2>
+        <p class="sub">Point it at <code>user@host:path</code>. It installs a tiny static agent there on first connection, watches the repository on the host and sends only diffs. Your keys and <code>~/.ssh/config</code> work as usual, and it reconnects on its own.</p>
+        <div class="stats">
+          <div><b>3 MB</b><span>agent on the host</span></div>
+          <div><b>~5 MB</b><span>of RAM, idle at 0% CPU</span></div>
+          <div><b>1</b><span>SSH connection for everything</span></div>
+        </div>
+      </div>
+      <div class="terminal-card">
+        <div><span class="p">$</span> difftower me@devbox:~/billing</div>
+        <div><span class="p">$</span> difftower devbox:~/repos <span class="p"># a folder of repos</span></div>
+        <div><span class="p">$</span> difftower ~/code/app</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <span class="kicker">Install</span>
+    <h2>One line, no root.</h2>
+    <div class="ways">
+      <div class="way">
+        <h3>Any Linux</h3>
+        <p>Installs into <code>~/.local</code>, with a launcher entry.</p>
+        <pre>curl -fsSL https://difftower.com/install.sh | sh</pre>
+      </div>
+      <div class="way">
+        <h3>Arch, Omarchy</h3>
+        <p>From the AUR.</p>
+        <pre>yay -S difftower-bin</pre>
+      </div>
+      <div class="way">
+        <h3>From source</h3>
+        <p>Rust, git, clang and lld.</p>
+        <pre>git clone https://github.com/a-gracia/difftower
+cd difftower && cargo dt</pre>
+      </div>
+    </div>
+    <p class="req">Needs Linux x86_64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch) and git. macOS is next.</p>
+  </section>
+
+  <div class="sponsor">
+    <div>
+      <h2>Free, and staying free.</h2>
+      <p>Difftower is open source under MIT or Apache-2.0, built by one developer. If it saves you a bad merge, a sponsorship keeps it going.</p>
+    </div>
+    <a class="btn primary" href="https://github.com/sponsors/a-gracia"><span class="heart">♥</span> Sponsor on GitHub</a>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="icon.svg" alt="">Difftower</a>
+    <span>MIT or Apache-2.0</span>
+    <span class="sp"></span>
+    <a href="https://github.com/a-gracia/difftower">GitHub</a>
+    <a href="https://github.com/a-gracia/difftower/releases">Releases</a>
+    <a href="https://github.com/sponsors/a-gracia">Sponsor</a>
+  </div>
+</footer>
+
+<script>
+  // The minimap: rows of code in miniature, changed ones tinted.
+  const mini = document.querySelector(".mini");
+  if (mini) {
+    let y = 6;
+    for (let i = 0; i < 70; i++) {
+      const row = document.createElement("span");
+      row.style.top = y + "px";
+      row.style.width = 8 + ((i * 37) % 40) + "px";
+      if (i > 12 && i < 18) row.style.background = i < 14 ? "rgba(248,81,73,.75)" : "rgba(63,185,80,.75)";
+      if (i === 30) row.style.background = "rgba(63,185,80,.75)";
+      mini.appendChild(row);
+      y += i % 7 === 6 ? 8 : 5;
+    }
+    const view = document.createElement("div");
+    view.className = "view";
+    mini.appendChild(view);
+  }
+  // Copy buttons.
+  document.querySelectorAll(".copy").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const text = document.getElementById(button.dataset.copy).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+        setTimeout(() => (button.textContent = "Copy"), 1600);
+      } catch {}
+    });
+  });
+</script>
+</body>
+</html>

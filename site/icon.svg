@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Difftower: a control tower built from diff lines, its beacon lit. -->
+  <rect width="256" height="256" rx="56" fill="#0d1117"/>
+  <circle cx="128" cy="50" r="13" fill="#58a6ff"/>
+  <circle cx="128" cy="50" r="24" fill="none" stroke="#58a6ff" stroke-opacity="0.35" stroke-width="5"/>
+  <rect x="104" y="82" width="48" height="18" rx="6" fill="#8b949e"/>
+  <rect x="88" y="110" width="80" height="18" rx="6" fill="#f85149"/>
+  <rect x="72" y="138" width="112" height="18" rx="6" fill="#3fb950"/>
+  <rect x="56" y="166" width="144" height="18" rx="6" fill="#3fb950"/>
+  <rect x="40" y="194" width="176" height="18" rx="6" fill="#8b949e"/>
+</svg>
