@@ -13,6 +13,7 @@
 <meta property="og:title" content="Difftower — a control tower for coding agents">
 <meta property="og:description" content="Not an IDE. Watch every change your agents make, guard the files they must not touch, run your tests. Native, fast, open source.">
 <meta property="og:image" content="https://difftower.com/og.png">
+<meta property="og:video" content="https://difftower.com/demo.mp4">
 <meta name="twitter:card" content="summary_large_image">
 <style>
   :root {
@@ -87,6 +88,8 @@
   .btn.ghost:hover { border-color: var(--faint); }
   .btn .heart { color: #db61a2; }
   .fine { margin-top: 16px; font-size: 13px; color: var(--faint); }
+
+  .demo { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #0a0d12; box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.8); }
 
   /* App mock */
   .shot { margin: 56px auto 0; max-width: 1060px; }
@@ -222,56 +225,10 @@
     </div>
     <p class="fine">Rust + GPUI · native and GPU-rendered · no telemetry · macOS soon</p>
 
-    <div class="shot" aria-label="Difftower's window: changed files, a diff, a minimap and an agent in the terminal">
-      <div class="window">
-        <div class="bar">
-          <img src="icon.svg" alt=""><b>billing</b><span class="chip">me@devbox</span><span class="chip">vs HEAD</span>
-          <span class="sp"></span><span class="run">▶ Run tests</span><span class="chip">Unified</span>
-        </div>
-        <div class="panes">
-          <div class="side">
-            <div class="tabs"><span class="on">Changes 4</span><span>Files</span><span>Protected</span><span>Tests</span></div>
-            <div class="row sel"><span class="n m">invoice.ts</span><span class="d">src/billing/</span><span class="c a">+9</span><span class="c r">−3</span></div>
-            <div class="row"><span class="n m">tax.ts</span><span class="d">src/billing/</span><span class="c a">+4</span><span class="c r">−1</span></div>
-            <div class="row"><span class="n a">rounding.ts</span><span class="d">src/money/</span><span class="c a">+22</span></div>
-            <div class="row"><span class="n r">invoice.test.ts</span><span class="d">tests/</span><span class="c r">🛡</span></div>
-          </div>
-          <div class="diff">
-            <div class="head"><b>src/billing/invoice.ts</b><span class="sp"></span><span>+9 −3</span></div>
-            <div class="ln"><i>12</i><u> </u><span><span class="k">import</span> { roundHalfEven } <span class="k">from</span> <span class="s">"../money/rounding"</span>;</span></div>
-            <div class="ln"><i>13</i><u> </u><span> </span></div>
-            <div class="ln"><i>14</i><u> </u><span><span class="k">export function</span> <span class="f">total</span>(lines: <span class="nm">Line</span>[]): <span class="nm">Money</span> {</span></div>
-            <div class="ln del"><i>15</i><u>−</u><span>  <span class="k">const</span> sum = lines.<span class="f">reduce</span>((a, l) => a + l.price * l.qty, <span class="nm">0</span>);</span></div>
-            <div class="ln del"><i>16</i><u>−</u><span>  <span class="k">return</span> Math.<span class="f">round</span>(sum * <span class="nm">100</span>) / <span class="nm">100</span>;</span></div>
-            <div class="ln add"><i>15</i><u>+</u><span>  <span class="k">const</span> cents = lines.<span class="f">map</span>((l) => <span class="f">toCents</span>(l.price) * l.qty);</span></div>
-            <div class="ln add"><i>16</i><u>+</u><span>  <span class="k">const</span> sum = cents.<span class="f">reduce</span>((a, c) => a + c, <span class="nm">0</span>);</span></div>
-            <div class="ln add"><i>17</i><u>+</u><span>  <span class="k">return</span> <span class="f">fromCents</span>(<span class="f">roundHalfEven</span>(sum));</span></div>
-            <div class="ln"><i>18</i><u> </u><span>}</span></div>
-            <div class="ln"><i>19</i><u> </u><span> </span></div>
-            <div class="ln"><i>20</i><u> </u><span><span class="cm">// Taxes apply per line, before the total.</span></span></div>
-            <div class="ln"><i>21</i><u> </u><span><span class="k">export function</span> <span class="f">withTax</span>(line: <span class="nm">Line</span>, rate: <span class="nm">number</span>) {</span></div>
-            <div class="ln add"><i>22</i><u>+</u><span>  <span class="k">if</span> (rate &lt; <span class="nm">0</span>) <span class="k">throw new</span> <span class="nm">RangeError</span>(<span class="s">"negative tax rate"</span>);</span></div>
-            <div class="ln"><i>23</i><u> </u><span>  <span class="k">return</span> { ...line, price: line.price * (<span class="nm">1</span> + rate) };</span></div>
-            <div class="ln"><i>24</i><u> </u><span>}</span></div>
-          </div>
-          <div class="mini" aria-hidden="true"></div>
-          <div class="term">
-            <div><span class="p">me@devbox</span>:<span class="q">~/billing</span>$ claude</div>
-            <div>&gt; totals are off by a cent sometimes,</div>
-            <div>&nbsp; fix the rounding</div>
-            <div style="color:var(--muted)">● Reading src/billing/invoice.ts</div>
-            <div style="color:var(--muted)">● Editing src/billing/invoice.ts</div>
-            <div style="color:var(--muted)">● Creating src/money/rounding.ts</div>
-            <div style="color:var(--red)">● Editing tests/invoice.test.ts</div>
-            <div style="color:var(--muted)">● Running the tests…</div>
-          </div>
-        </div>
-        <div class="status">
-          <span class="alert">🛡 1 protected file modified</span><span>↺ Revert</span>
-          <span class="r">✕ 2 tests failed</span><span class="sp"></span><span>4 files <span class="a">+35</span> <span class="r">−4</span></span>
-        </div>
-      </div>
-      <p class="caption">The agent edited a test it was not supposed to touch. You see it the moment it happens.</p>
+    <div class="shot">
+      <video class="demo" src="demo.mp4" poster="demo-poster.jpg" autoplay muted loop playsinline controls
+        aria-label="Difftower demo: protecting a test, Claude Code fixing a bug, the protected test flagged, tests passing and a commit"></video>
+      <p class="caption">A real run: Claude Code fixes a bug and edits a protected test. Difftower flags it the moment it happens.</p>
     </div>
   </div>
 </header>
@@ -390,23 +347,6 @@ cd difftower && cargo dt</pre>
 </footer>
 
 <script>
-  // The minimap: rows of code in miniature, changed ones tinted.
-  const mini = document.querySelector(".mini");
-  if (mini) {
-    let y = 6;
-    for (let i = 0; i < 70; i++) {
-      const row = document.createElement("span");
-      row.style.top = y + "px";
-      row.style.width = 8 + ((i * 37) % 40) + "px";
-      if (i > 12 && i < 18) row.style.background = i < 14 ? "rgba(248,81,73,.75)" : "rgba(63,185,80,.75)";
-      if (i === 30) row.style.background = "rgba(63,185,80,.75)";
-      mini.appendChild(row);
-      y += i % 7 === 6 ? 8 : 5;
-    }
-    const view = document.createElement("div");
-    view.className = "view";
-    mini.appendChild(view);
-  }
   // Copy buttons.
   document.querySelectorAll(".copy").forEach((button) => {
     button.addEventListener("click", async () => {

@@ -3,6 +3,10 @@
 **A control tower for coding agents.** Difftower is a fast, native diff
 monitor for the way code gets written now: an agent edits, you supervise.
 
+![Claude Code fixes a bug and edits a protected test; Difftower flags it, the tests pass, and a commit clears it](site/demo.gif)
+
+[Watch the full demo](https://difftower.com/demo.mp4) · [difftower.com](https://difftower.com)
+
 It is not an editor. It shows, live, everything your agents changed
 against HEAD, lets you read it file by file, guards the files agents must
 not touch and runs your tests. Locally or on a server over SSH, one
@@ -112,6 +116,13 @@ terminal keep their width and the diff takes the rest.
 | `Alt+Z` | Wrap long lines |
 | ``Ctrl+` `` | Move between the terminal and the diff |
 | `Ctrl+Shift+T` | Run every test |
+
+On Omarchy, Super+C and Super+V copy and paste in the terminal once
+Hyprland takes Difftower for a terminal; add to `~/.config/hypr/hyprland.lua`:
+
+```lua
+o.window("difftower", { tag = "+terminal" })
+```
 
 `Ctrl+P` and the single letters work when the focus is outside the terminal,
 which keeps them for the shell: click the file list or the diff first.
