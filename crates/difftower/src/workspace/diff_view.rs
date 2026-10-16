@@ -2,9 +2,9 @@ use std::{cell::Cell, collections::HashMap, rc::Rc};
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _,
+    ActiveTheme as _, GlobalState, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    diff::{Diff, OverviewKind},
+    diff::{Diff, DiffState, MINIMAP_COLUMNS, OverviewKind},
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -32,9 +32,18 @@ impl Workspace {
     }
 
     fn render_preview(&self, preview: &super::Preview, cx: &mut Context<Self>) -> AnyElement {
+        let minimap = preview.state.clone().map(|state| self.render_minimap(state, cx).into_any_element());
         let theme = cx.theme();
         let body = match (&preview.state, &preview.message) {
-            (Some(state), _) => Diff::new(state).header_visible(false).soft_wrap(self.settings.soft_wrap).into_any_element(),
+            (Some(state), _) => h_flex()
+                .size_full()
+                .child(
+                    div().flex_1().min_w_0().h_full().child(
+                        Diff::new(state).header_visible(false).soft_wrap(self.settings.soft_wrap).vertical_scrollbar(false),
+                    ),
+                )
+                .children(minimap)
+                .into_any_element(),
             (None, message) => div()
                 .size_full()
                 .flex()
@@ -113,6 +122,8 @@ impl Workspace {
         // be scrolled out of view.
         let diff = Diff::new(&self.diff)
             .soft_wrap(self.settings.soft_wrap)
+            // The minimap beside it scrolls instead.
+            .vertical_scrollbar(false)
             .render_header_title_suffix(move |file, _, cx| {
                 let path = file.path().to_string();
                 let state = states.get(&path);
@@ -151,80 +162,154 @@ impl Workspace {
         h_flex()
             .size_full()
             .child(div().flex_1().min_w_0().h_full().child(diff))
-            .child(self.render_overview(cx))
+            .child(self.render_minimap(self.diff.clone(), cx))
             .into_any_element()
     }
 
-    /// A strip beside the diff with a mark where each change is and the part
-    /// in view; clicking or dragging on it scrolls there.
-    fn render_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A minimap beside the diff, as in VS Code: the file in miniature,
+    /// changed rows tinted, and a box over the part in view. Clicking
+    /// centers the view there; dragging the box scrolls with it. A file
+    /// taller than the minimap scrolls it along.
+    fn render_minimap(&self, state: Entity<DiffState>, cx: &mut Context<Self>) -> impl IntoElement {
+        const ROW: f32 = 3.;
+        const BLOCK: f32 = 2.;
+        const CHAR: f32 = 0.8;
         let theme = cx.theme();
         let (added, removed, modified) = (theme.success, theme.danger, theme.blue);
-        let in_view = theme.foreground.opacity(0.12);
+        let (text, slider, slider_hover) =
+            (theme.foreground.opacity(0.45), theme.foreground.opacity(0.08), theme.foreground.opacity(0.16));
         let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
-        let state = self.diff.clone();
-        let scroll_to = {
-            let (bounds, state) = (bounds.clone(), state.clone());
-            move |y: Pixels, cx: &mut App| {
-                let bounds = bounds.get();
-                if bounds.size.height > px(0.) {
-                    let fraction = (y - bounds.origin.y) / bounds.size.height;
-                    state.update(cx, |state, cx| state.scroll_to_fraction(fraction, cx));
-                }
+        let (hovered, drag) = (self.minimap_hover.clone(), self.minimap_drag.clone());
+
+        // Where the slider sits for a first row in view: `first * k` pixels
+        // from the top, `k` shrinking when the minimap scrolls too.
+        let geometry = |total: usize, visible: f32, height: f32| -> f32 {
+            let fits = height / ROW;
+            if (total as f32) <= fits || (total as f32) <= visible {
+                ROW
+            } else {
+                ROW * (1. - (total as f32 - fits) / (total as f32 - visible))
             }
         };
-        let drag_to = scroll_to.clone();
+        let to_first = {
+            let (bounds, state) = (bounds.clone(), state.clone());
+            move |y: Pixels, grab: f32, cx: &mut App| {
+                let area = bounds.get();
+                let (total, _, visible) = state.read(cx).minimap_view();
+                let k = geometry(total, visible, f32::from(area.size.height));
+                let slider_top = f32::from(y - area.origin.y) - grab;
+                state.update(cx, |state, cx| state.scroll_to_row(slider_top / k.max(f32::EPSILON), cx));
+            }
+        };
+        let (press, drag_to) = (to_first.clone(), to_first);
+        let (press_bounds, press_state, press_drag) = (bounds.clone(), state.clone(), drag.clone());
+        let hover_state = state.clone();
+
         div()
-            .id("overview")
+            .id("minimap")
             .flex_none()
-            .w(px(12.))
+            .w(px(MINIMAP_COLUMNS as f32 * CHAR + 8.))
             .h_full()
             .border_l_1()
             .border_color(theme.border)
             .cursor_pointer()
+            .on_hover(move |is_hovered, _, cx| {
+                hovered.set(*is_hovered);
+                hover_state.update(cx, |_, cx| cx.notify());
+            })
             .child(
                 canvas(
                     {
                         let bounds = bounds.clone();
                         move |area, _, _| bounds.set(area)
                     },
-                    move |area, (), window, cx| {
-                        let overview = state.read(cx).overview();
-                        let height = area.size.height;
-                        let at = |fraction: f32| area.origin.y + height * fraction;
-                        let visible = &overview.visible;
-                        if visible.end > visible.start {
-                            let top = at(visible.start);
-                            let box_height = (height * (visible.end - visible.start)).max(px(6.));
-                            window.paint_quad(fill(
-                                Bounds::new(point(area.origin.x, top), size(area.size.width, box_height)),
-                                in_view,
-                            ));
-                        }
-                        for mark in &overview.marks {
-                            let color = match mark.kind {
-                                OverviewKind::Added => added,
-                                OverviewKind::Removed => removed,
-                                OverviewKind::Modified => modified,
-                            };
-                            let mark_height = (height * (mark.end - mark.start)).max(px(2.));
-                            window.paint_quad(fill(
-                                Bounds::new(
-                                    point(area.origin.x + px(3.), at(mark.start)),
-                                    size(area.size.width - px(6.), mark_height),
-                                ),
-                                color,
-                            ));
+                    {
+                        let hovered = self.minimap_hover.clone();
+                        move |area, (), window, cx| {
+                            // A drag follows the pointer anywhere in the window, and
+                            // the diff underneath must not take it as selecting text.
+                            let (move_drag, up_drag) = (drag.clone(), drag.clone());
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                let Some(grab) = move_drag.get() else { return };
+                                if !phase.capture() {
+                                    return;
+                                }
+                                if event.pressed_button != Some(MouseButton::Left) {
+                                    move_drag.set(None);
+                                    return;
+                                }
+                                drag_to(event.position.y, grab, cx);
+                                cx.stop_propagation();
+                            });
+                            // Releasing ends the drag; everyone else must see it too.
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, _| {
+                                if phase.capture() {
+                                    up_drag.set(None);
+                                }
+                            });
+                            // A press here is a drag, never the start of a text selection.
+                            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
+                                if phase.capture() && area.contains(&event.position) {
+                                    GlobalState::suppress_text_selection(cx);
+                                }
+                            });
+                            let (total, first, visible) = state.read(cx).minimap_view();
+                            let height = f32::from(area.size.height);
+                            let fits = (height / ROW).ceil() as usize + 1;
+                            let k = geometry(total, visible, height);
+                            // The first row of the minimap: zero unless it scrolls.
+                            let offset = (first - first * k / ROW).max(0.);
+                            let start = offset.floor() as usize;
+                            let rows = state.read(cx).minimap_rows(start..start + fits, cx);
+                            let x0 = area.origin.x + px(4.);
+                            for (i, row) in rows.iter().enumerate() {
+                                let y = area.origin.y + px((start as f32 + i as f32 - offset) * ROW);
+                                if let Some(kind) = row.change {
+                                    let color = match kind {
+                                        OverviewKind::Added => added,
+                                        OverviewKind::Removed => removed,
+                                        OverviewKind::Modified => modified,
+                                    };
+                                    window.paint_quad(fill(
+                                        Bounds::new(point(area.origin.x, y), size(area.size.width, px(ROW))),
+                                        color.opacity(0.22),
+                                    ));
+                                    window.paint_quad(fill(Bounds::new(point(area.origin.x, y), size(px(2.), px(ROW))), color));
+                                }
+                                for &(col, len, color) in &row.runs {
+                                    window.paint_quad(fill(
+                                        Bounds::new(
+                                            point(x0 + px(col as f32 * CHAR), y),
+                                            size(px((len as f32 * CHAR).max(CHAR)), px(BLOCK)),
+                                        ),
+                                        color.map_or(text, |c| c.opacity(0.75)),
+                                    ));
+                                }
+                            }
+                            if total > 0 && visible < total as f32 {
+                                let top = area.origin.y + px(first * k);
+                                let box_height = px((visible * ROW).min(height).max(8.));
+                                window.paint_quad(fill(
+                                    Bounds::new(point(area.origin.x, top), size(area.size.width, box_height)),
+                                    if hovered.get() { slider_hover } else { slider },
+                                ));
+                            }
                         }
                     },
                 )
                 .size_full(),
             )
-            .on_mouse_down(MouseButton::Left, move |event, _, cx| scroll_to(event.position.y, cx))
-            .on_mouse_move(move |event: &MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left) {
-                    drag_to(event.position.y, cx);
-                }
+            .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+                GlobalState::suppress_text_selection(cx);
+                let area = press_bounds.get();
+                let (total, first, visible) = press_state.read(cx).minimap_view();
+                let k = geometry(total, visible, f32::from(area.size.height));
+                let y = f32::from(event.position.y - area.origin.y);
+                let (top, bottom) = (first * k, first * k + visible * ROW);
+                // On the box, it moves with the pointer; elsewhere it centers there.
+                let grab = if (top..bottom).contains(&y) { y - top } else { visible * ROW / 2. };
+                press_drag.set(Some(grab));
+                press(event.position.y, grab, cx);
             })
     }
 }

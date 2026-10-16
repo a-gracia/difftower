@@ -8,9 +8,10 @@ use std::{
 
 use gpui::{
     App, AppContext as _, Context, ElementId, EventEmitter, FocusHandle, Focusable, ListAlignment,
-    ListOffset, ListState, Pixels, ScrollHandle, SharedString, Size, Subscription, Task, Window,
-    WindowId, point, px,
+    HighlightStyle, Hsla, ListOffset, ListState, Pixels, ScrollHandle, SharedString, Size,
+    Subscription, Task, Window, WindowId, point, px,
 };
+use crate::ActiveTheme as _;
 use gpui_base::{TextSelection, TextSelectionContentKey, TextSelectionEvent, TextSelectionHandle};
 
 use super::{
@@ -86,6 +87,23 @@ pub enum OverviewKind {
     Removed,
     /// A removed and an added line side by side in a split diff.
     Modified,
+}
+
+// Difftower: see [`DiffState::minimap_rows`].
+/// Columns of a line drawn in a minimap; the rest is cut.
+pub const MINIMAP_COLUMNS: usize = 120;
+
+/// One displayed row in miniature.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MinimapRow {
+    pub change: Option<OverviewKind>,
+    /// Words as `(column, length, color)`; no color is the text color.
+    pub runs: Vec<(u16, u16, Option<Hsla>)>,
+}
+
+fn minimap_run(col: usize, len: usize, byte: usize, highlights: &[(Range<usize>, HighlightStyle)]) -> (u16, u16, Option<Hsla>) {
+    let color = highlights.iter().find(|(range, _)| range.contains(&byte)).and_then(|(_, style)| style.color);
+    (col as u16, len as u16, color)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -857,6 +875,84 @@ impl DiffState {
         let start = (top.item_ix as f32 / total).min(1.);
         let end = ((top.item_ix as f32 + visible_rows) / total).min(1.);
         DiffOverview { marks, visible: start..end.max(start) }
+    }
+
+    // Difftower: rows in miniature for a minimap beside the diff.
+    /// How many rows the diff displays, the first one in view (with the
+    /// part of it scrolled past) and how many rows fit in view.
+    pub fn minimap_view(&self) -> (usize, f32, f32) {
+        let total = self.rows.len();
+        let top = self.list.logical_scroll_top();
+        let (first, visible) = match self.row_height {
+            Some(height) if height > px(0.) => {
+                (top.item_ix as f32 + top.offset_in_item / height, self.viewport.height / height)
+            }
+            _ => (top.item_ix as f32, total as f32),
+        };
+        (total, first, visible)
+    }
+
+    /// The rows in `range` as runs of text: for each row, whether it
+    /// changed, and its words as `(column, length, color)`.
+    pub fn minimap_rows(&self, range: Range<usize>, cx: &App) -> Vec<MinimapRow> {
+        let theme = cx.theme().highlight_theme.clone();
+        let range = range.start.min(self.rows.len())..range.end.min(self.rows.len());
+        self.rows[range]
+            .iter()
+            .map(|row| {
+                let DisplayRow::Code { file, original, modified, changed } = row else {
+                    return MinimapRow::default();
+                };
+                let change = changed.then(|| match (original, modified) {
+                    (Some(_), Some(_)) => OverviewKind::Modified,
+                    (None, Some(_)) => OverviewKind::Added,
+                    _ => OverviewKind::Removed,
+                });
+                let (side, ix) = match (modified, original) {
+                    (Some(ix), _) => (DiffSide::Modified, *ix),
+                    (None, Some(ix)) => (DiffSide::Original, *ix),
+                    (None, None) => return MinimapRow { change, runs: Vec::new() },
+                };
+                let line = &self.files[*file].lines(side)[ix];
+                let highlights = self
+                    .presentations
+                    .get(*file)
+                    .and_then(Option::as_ref)
+                    .map(|p| p.syntax_highlights(line, side, ix, theme.as_ref()))
+                    .unwrap_or_default();
+                let text = line.display();
+                let mut runs = Vec::new();
+                let mut start: Option<(usize, usize)> = None;
+                for (col, (byte, ch)) in text.char_indices().enumerate().take(MINIMAP_COLUMNS) {
+                    match (ch.is_whitespace(), start) {
+                        (false, None) => start = Some((col, byte)),
+                        (true, Some((col0, byte0))) => {
+                            runs.push(minimap_run(col0, col - col0, byte0, &highlights));
+                            start = None;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((col0, byte0)) = start {
+                    let end = text.chars().count().min(MINIMAP_COLUMNS);
+                    runs.push(minimap_run(col0, end - col0, byte0, &highlights));
+                }
+                MinimapRow { change, runs }
+            })
+            .collect()
+    }
+
+    /// Scrolls so `row`, possibly fractional, is the first row in view.
+    pub fn scroll_to_row(&mut self, row: f32, cx: &mut Context<Self>) {
+        let total = self.rows.len();
+        if total == 0 {
+            return;
+        }
+        let row = row.clamp(0., (total - 1) as f32);
+        let item_ix = row as usize;
+        let offset_in_item = self.row_height.map_or(px(0.), |height| height * (row - item_ix as f32));
+        self.list.scroll_to(ListOffset { item_ix, offset_in_item });
+        cx.notify();
     }
 
     /// Scrolls so the row at `fraction` of all displayed rows is centered.

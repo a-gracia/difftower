@@ -7,6 +7,8 @@ mod gutter;
 mod parser;
 #[cfg(test)]
 mod parser_tests;
+#[cfg(test)]
+mod vertical_scroll_tests;
 mod presentation;
 mod selection;
 mod state;
@@ -15,7 +17,7 @@ pub use conflict::{DiffConflict, DiffConflictResolution};
 pub use document::{DiffFile, DiffFileStatus, DiffLinePosition, DiffLineRange, DiffSide};
 pub use parser::DiffParseError;
 pub use presentation::DiffInlineUnit;
-pub use state::{DiffEvent, DiffOverview, DiffState, OverviewKind, OverviewMark};
+pub use state::{DiffEvent, DiffOverview, DiffState, MINIMAP_COLUMNS, MinimapRow, OverviewKind, OverviewMark};
 
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
@@ -212,6 +214,8 @@ pub struct Diff {
     change_indicator: DiffChangeIndicator,
     change_background: bool,
     soft_wrap: bool,
+    // Difftower: off when the owner draws its own, such as a minimap.
+    vertical_scrollbar: bool,
     header: HeaderSlots,
     annotations: Rc<Annotations>,
     annotation_content: Option<AnnotationRenderer>,
@@ -241,6 +245,7 @@ impl Diff {
             change_indicator: DiffChangeIndicator::default(),
             change_background: true,
             soft_wrap: false,
+            vertical_scrollbar: true,
             header: HeaderSlots::default(),
             annotations: Rc::default(),
             annotation_content: None,
@@ -288,6 +293,12 @@ impl Diff {
     /// Default is false.
     pub fn soft_wrap(mut self, value: bool) -> Self {
         self.soft_wrap = value;
+        self
+    }
+    // Difftower: see `vertical_scrollbar`.
+    /// Shows the vertical scrollbar. Default is true.
+    pub fn vertical_scrollbar(mut self, visible: bool) -> Self {
+        self.vertical_scrollbar = visible;
         self
     }
     /// Supplies annotations with stable identities and targets.
@@ -537,6 +548,7 @@ fn render_diff(
     // Difftower: without wrapping, a split diff fits the viewport and each
     // side scrolls sideways on its own, instead of both scrolling together
     // across a list as wide as the longest line.
+    let vertical_scrollbar = props.vertical_scrollbar;
     let independent = mode == DiffMode::Split && !soft_wrap;
     let content_width = if independent {
         state.viewport().width
@@ -636,7 +648,7 @@ fn render_diff(
             this.child(split_scroll_catcher(cx.entity(), split_max))
         })
         .when(has_rows, |this| {
-            this.child(Scrollbar::vertical(&scrollbar))
+            this.when(vertical_scrollbar, |this| this.child(Scrollbar::vertical(&scrollbar)))
                 .when(!soft_wrap && !independent, |this| {
                     this.child(Scrollbar::horizontal(&horizontal))
                 })

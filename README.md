@@ -13,8 +13,9 @@ repository or several at once.
 - **Live diff of your repo.** Everything that differs from HEAD, untracked
   files included, updated as the agent writes.
 - **Read it like a pull request.** The selected file is shown in full with
-  its changes, next to a ruler marking where they are, with `+`/`−` counts
-  per file. Unified or split view (each side scrolls sideways on its own)
+  its changes, next to a minimap of the file with its changes tinted and
+  the part in view boxed, as in VS Code; click or drag it to move. `+`/`−`
+  counts per file. Unified or split view (each side scrolls sideways on its own)
   and syntax highlighting. There is nothing to approve: a change is
   accepted when you commit it.
 - **File tree.** Browse every file in the repository, see which folders

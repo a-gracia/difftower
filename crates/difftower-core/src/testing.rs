@@ -232,10 +232,25 @@ pub struct TestRun {
 
 impl Drop for TestRun {
     fn drop(&mut self) {
-        if !self.finished.load(Ordering::SeqCst) {
-            // The shell leads its own process group: stop everything in it.
-            let _ = Command::new("kill").arg("-TERM").arg(format!("-{}", self.pid)).status();
+        if self.finished.load(Ordering::SeqCst) {
+            return;
         }
+        // The shell leads its own process group: stop everything in it,
+        // letting runners clean up first. An interactive shell ignores
+        // SIGTERM, and a runner it starts after this would live on, so what
+        // is left gets SIGKILL after a grace period.
+        let (pid, finished) = (self.pid, self.finished.clone());
+        let signal = move |name: &str| Command::new("kill").arg(format!("-{name}")).arg(format!("-{pid}")).status();
+        let _ = signal("TERM");
+        std::thread::spawn(move || {
+            for _ in 0..30 {
+                if finished.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = signal("KILL");
+        });
     }
 }
 

@@ -141,6 +141,10 @@ pub struct Workspace {
     /// A line to scroll to once the file being opened shows.
     pending_line: Option<(String, usize)>,
     finder: Option<finder::Finder>,
+    /// The pointer is over the minimap: its view box shows stronger.
+    minimap_hover: Rc<std::cell::Cell<bool>>,
+    /// While dragging the minimap's view box, where it was grabbed.
+    minimap_drag: Rc<std::cell::Cell<Option<f32>>>,
     selected: Option<String>,
     error: Option<SharedString>,
     refreshing: Option<Task<()>>,
@@ -226,6 +230,8 @@ impl Workspace {
             loaded: false,
             pending_line: None,
             finder: None,
+            minimap_hover: Rc::default(),
+            minimap_drag: Rc::default(),
             selected: None,
             error,
             refreshing: None,
