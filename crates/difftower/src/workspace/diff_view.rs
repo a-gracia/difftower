@@ -124,6 +124,8 @@ impl Workspace {
             .soft_wrap(self.settings.soft_wrap)
             // The minimap beside it scrolls instead.
             .vertical_scrollbar(false)
+            // The whole file is shown: one number per row is enough.
+            .single_line_number(true)
             .render_header_title_suffix(move |file, _, cx| {
                 let path = file.path().to_string();
                 let state = states.get(&path);

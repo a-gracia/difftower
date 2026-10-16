@@ -274,6 +274,9 @@ pub struct DiffState {
     layout: Option<LayoutKey>,
     content_width: Pixels,
     row_height: Option<Pixels>,
+    /// Difftower: the list width the row height hint was last applied at;
+    /// see [`Self::rehint_after_layout`].
+    hinted_width: Option<Pixels>,
     annotations: HashSet<(Option<DiffLinePosition>, SharedString, ElementId)>,
     window: Option<WindowId>,
     /// Bumped when files or presentation options change, so a preparation
@@ -406,6 +409,7 @@ impl DiffState {
             layout: None,
             content_width: px(0.),
             row_height: None,
+            hinted_width: None,
             annotations: HashSet::new(),
             window: None,
             presentation_generation: 0,
@@ -1521,6 +1525,22 @@ impl DiffState {
 
     /// Gives unmeasured rows a code-row height so the scrollbar is sized for
     /// the whole patch before every row has been rendered.
+    // Difftower: GPUI's list forgets every unmeasured row's height hint when
+    // its width changes, its first layout included. Rows it has not measured
+    // then count as no height: the scrollbar and the wheel stop short of the
+    // end, and rows past it are never laid out to be measured.
+    /// Restores the row height hint after a layout at a new list width.
+    /// Call it once the list has been laid out; returns whether it did.
+    pub(crate) fn rehint_after_layout(&mut self) -> bool {
+        let width = self.list.viewport_bounds().size.width;
+        if self.row_height.is_none() || self.hinted_width == Some(width) {
+            return false;
+        }
+        self.hinted_width = Some(width);
+        self.apply_row_height_hint();
+        true
+    }
+
     fn apply_row_height_hint(&self) {
         if let Some(height) = self.row_height {
             let _ = self.list.clone().with_uniform_item_height(height);

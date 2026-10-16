@@ -122,3 +122,65 @@ fn a_file_opened_into_an_empty_diff_scrolls_at_once(cx: &mut TestAppContext) {
         }
     }
 }
+
+struct Narrow {
+    state: Entity<DiffState>,
+    soft_wrap: bool,
+}
+
+impl Render for Narrow {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(240.)).h(px(400.)).flex().flex_col().child(Diff::new(&self.state).header_visible(false).soft_wrap(self.soft_wrap))
+    }
+}
+
+/// GPUI's list drops the row height estimate of unmeasured rows on its first
+/// layout; the wheel must still reach the last row, wrapped or not.
+#[gpui::test]
+fn the_wheel_reaches_the_end_of_a_file(cx: &mut TestAppContext) {
+    for soft_wrap in [true, false] {
+        reach_the_end(cx, soft_wrap);
+    }
+}
+
+fn reach_the_end(cx: &mut TestAppContext, soft_wrap: bool) {
+    cx.update(crate::init);
+    let body: String = (0..300)
+        .map(|i| format!(" \"key_{i}\": \"a value long enough to wrap over several rows in a narrow panel, number {i}\",\n"))
+        .collect();
+    let patch = format!("diff --git a/a.json b/a.json\n--- a/a.json\n+++ b/a.json\n@@ -1,300 +1,300 @@\n{body}");
+    let file = DiffFile::parse(&patch).unwrap().remove(0);
+    let state = cx.new(|cx| DiffState::new([file], cx).with_context_lines(None));
+    let (_, cx) = cx.add_window_view({
+        let state = state.clone();
+        move |_, _| Narrow { state, soft_wrap }
+    });
+    draw(cx);
+    for _ in 0..400 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(120.), px(200.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-300.))),
+            modifiers: Modifiers::default(),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        if std::env::var_os("SCROLL_TRACE").is_some() {
+            let (first, max) = cx.update(|_, cx| {
+                let list = state.read(cx).list().clone();
+                (state.read(cx).minimap_view().1, list.max_offset_for_scrollbar().y)
+            });
+            let width = cx.update(|_, cx| state.read(cx).list().viewport_bounds().size.width);
+            eprintln!("first row {first:.2}, scroll max {max:?}, list width {width:?}");
+        }
+    }
+    draw(cx);
+    let (last_shown, at_end, top) = cx.update(|_, cx| {
+        let state = state.read(cx);
+        let last = state.rows().len() - 1;
+        (state.list().bounds_for_item(last).is_some(), state.list().is_scrolled_to_end(), state.minimap_view().1)
+    });
+    assert!(
+        last_shown && at_end == Some(true),
+        "soft_wrap={soft_wrap}: the last row never came into view: first row {top}, at end {at_end:?}"
+    );
+}

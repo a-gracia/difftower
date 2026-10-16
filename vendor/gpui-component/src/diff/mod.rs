@@ -216,6 +216,8 @@ pub struct Diff {
     soft_wrap: bool,
     // Difftower: off when the owner draws its own, such as a minimap.
     vertical_scrollbar: bool,
+    // Difftower: one line-number column in a unified diff, not two.
+    single_line_number: bool,
     header: HeaderSlots,
     annotations: Rc<Annotations>,
     annotation_content: Option<AnnotationRenderer>,
@@ -246,6 +248,7 @@ impl Diff {
             change_background: true,
             soft_wrap: false,
             vertical_scrollbar: true,
+            single_line_number: false,
             header: HeaderSlots::default(),
             annotations: Rc::default(),
             annotation_content: None,
@@ -299,6 +302,14 @@ impl Diff {
     /// Shows the vertical scrollbar. Default is true.
     pub fn vertical_scrollbar(mut self, visible: bool) -> Self {
         self.vertical_scrollbar = visible;
+        self
+    }
+    // Difftower: see `single_line_number`.
+    /// In a unified diff, shows each row's number in one column, the
+    /// current file's or a deleted line's former one, instead of a column
+    /// for each side. Default is false.
+    pub fn single_line_number(mut self, single: bool) -> Self {
+        self.single_line_number = single;
         self
     }
     /// Supplies annotations with stable identities and targets.
@@ -575,6 +586,7 @@ fn render_diff(
         rem,
         expansion_lines: state.expansion_lines(),
         line_number: props.line_number,
+        single_line_number: props.single_line_number,
         syntax_highlight: props.syntax_highlight,
         header_visible: props.header_visible,
         hover_highlight: props.hover_highlight,
@@ -778,7 +790,9 @@ fn render_diff(
                                 let painted = state.geometry().borrow().painted_width();
                                 code_width(painted, gutter_width, rem, mode)
                             };
-                            if state.record_paint(bounds.size, painted) {
+                            // Difftower: this runs after the list's layout.
+                            let rehinted = state.rehint_after_layout();
+                            if state.record_paint(bounds.size, painted) || rehinted {
                                 cx.notify();
                             }
                         });
@@ -832,6 +846,7 @@ struct CodePresentation {
     rem: Pixels,
     expansion_lines: usize,
     line_number: bool,
+    single_line_number: bool,
     syntax_highlight: bool,
     header_visible: bool,
     hover_highlight: DiffHoverHighlight,
@@ -1283,18 +1298,18 @@ fn render_file_header(
             .min_w_0()
             .gap_2()
             .children(prefix)
-            .child(
-                h_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .gap_2()
-                    .child(div().min_w_0().truncate().font_medium().child(name))
-                    .when_some(title_suffix, |this, suffix| {
-                        this.child(div().flex_shrink_0().child(suffix))
-                    }),
-            )
+            // Difftower: the name gives way first; the suffix stays whole
+            // beside it instead of spilling out of a shrunken box, and a
+            // spacer pushes the statistics to the end.
+            .child(div().min_w_0().truncate().font_medium().child(name))
+            .when_some(title_suffix, |this, suffix| {
+                this.child(div().flex_shrink_0().child(suffix))
+            })
+            .child(div().flex_1())
+            // Difftower: in a narrow header these keep their width and the
+            // name gives way; shrunk, their text spilled over the buttons.
             .when(statistics, |this| {
-                this.child(div().text_xs().text_color(foreground).child(format!(
+                this.child(div().flex_shrink_0().whitespace_nowrap().text_xs().text_color(foreground).child(format!(
                     "+{} −{}",
                     document.additions(),
                     document.deletions()
@@ -1303,6 +1318,8 @@ fn render_file_header(
             .when_some(status, |this, status| {
                 this.child(
                     div()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
                         .text_xs()
                         .text_color(foreground)
                         .child(status.to_string()),
@@ -1486,6 +1503,8 @@ fn render_unified_cell(
     }
     let gutters = if single_column {
         [Some((DiffSide::Modified, modified)), None]
+    } else if code.single_line_number {
+        [Some((side, Some(ix))), None]
     } else {
         [
             Some((DiffSide::Original, original)),
