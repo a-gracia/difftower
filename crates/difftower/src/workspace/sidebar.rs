@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
 use difftower_core::ChangeStatus;
 use gpui_kit::assets::IconName as Lucide;
@@ -70,32 +70,54 @@ impl Workspace {
             .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
     }
 
-    fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut items: Vec<AnyElement> = Vec::new();
+    /// The rows of the Changes tab: a header per repository in a
+    /// multi-repository workspace, then its changes unless folded.
+    fn change_rows(&self) -> Vec<ChangeRow> {
         let repos = self.backend.repos();
-        if repos.len() > 1 {
-            // Changes arrive ordered by repository; group consecutive ones.
-            let mut start = 0;
-            while start < self.changes.len() {
-                let repo = repo_of(&self.changes[start].path, &repos);
-                let end = self.changes[start..]
-                    .iter()
-                    .position(|c| repo_of(&c.path, &repos) != repo)
-                    .map_or(self.changes.len(), |n| start + n);
-                items.push(self.render_repo_header(repo, start..end, cx));
-                if !self.collapsed_repos.contains(repo) {
-                    let prefix = if repo.is_empty() { String::new() } else { format!("{repo}/") };
-                    for ix in start..end {
-                        items.push(self.render_change(ix, &prefix, cx));
-                    }
-                }
-                start = end;
-            }
-        } else {
-            items.extend((0..self.changes.len()).map(|ix| self.render_change(ix, "", cx)));
+        if repos.len() <= 1 {
+            return (0..self.changes.len()).map(ChangeRow::Change).collect();
         }
+        let mut rows = Vec::new();
+        // Changes arrive ordered by repository; group consecutive ones.
+        let mut start = 0;
+        while start < self.changes.len() {
+            let repo = repo_of(&self.changes[start].path, &repos);
+            let end = self.changes[start..]
+                .iter()
+                .position(|c| repo_of(&c.path, &repos) != repo)
+                .map_or(self.changes.len(), |n| start + n);
+            rows.push(ChangeRow::Header { repo: repo.to_owned(), range: start..end });
+            if !self.collapsed_repos.contains(repo) {
+                rows.extend((start..end).map(ChangeRow::Change));
+            }
+            start = end;
+        }
+        rows
+    }
 
-        v_flex().id("changes").size_full().py_1().overflow_y_scroll().children(items)
+    /// Only the rows in view are built: thousands of changes stay fast.
+    fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = Rc::new(self.change_rows());
+        let grouped = self.backend.repos().len() > 1;
+        uniform_list(
+            "changes",
+            rows.len(),
+            cx.processor(move |this, range: Range<usize>, _, cx| {
+                let repos = this.backend.repos();
+                range
+                    .map(|ix| match &rows[ix] {
+                        ChangeRow::Header { repo, range } => this.render_repo_header(repo, range.clone(), cx),
+                        ChangeRow::Change(change) => {
+                            let repo = repo_of(&this.changes[*change].path, &repos);
+                            let prefix = if repo.is_empty() { String::new() } else { format!("{repo}/") };
+                            this.render_change(*change, &prefix, grouped, cx)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .size_full()
+        .py_1()
     }
 
     fn render_repo_header(&self, repo: &str, range: Range<usize>, cx: &mut Context<Self>) -> AnyElement {
@@ -140,8 +162,9 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// One changed file, its directory shown without `prefix`.
-    fn render_change(&self, ix: usize, prefix: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// One changed file, its directory shown without `prefix`, indented
+    /// under its repository's header when `grouped`.
+    fn render_change(&self, ix: usize, prefix: &str, grouped: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let change = &self.changes[ix];
         let path = change.path.clone();
@@ -156,7 +179,7 @@ impl Workspace {
         h_flex()
             .id(("change", ix))
             .h(ROW_HEIGHT)
-            .pl(px(if prefix.is_empty() { 8. } else { 8. + 2. * INDENT + 4. }))
+            .pl(px(if grouped { 8. + 2. * INDENT + 4. } else { 8. }))
             .pr_3()
             .gap_1p5()
             .text_size(NAME_SIZE)
@@ -500,6 +523,12 @@ impl Workspace {
             })
             .into_any_element()
     }
+}
+
+enum ChangeRow {
+    Header { repo: String, range: Range<usize> },
+    /// A change, by index.
+    Change(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

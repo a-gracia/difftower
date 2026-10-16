@@ -122,6 +122,8 @@ pub struct Workspace {
     changes: Vec<Change>,
     /// Lines added and removed in each change, in the same order.
     change_counts: Vec<(usize, usize)>,
+    /// Each change's index by path, for lookups from every visible row.
+    change_index: HashMap<String, usize>,
     /// Number of changed files below each directory.
     changed_dirs: HashMap<String, usize>,
     /// Changed files that a protection rule covers; committing or reverting
@@ -235,6 +237,7 @@ impl Workspace {
             guard: Guard::empty(),
             changes: Vec::new(),
             change_counts: Vec::new(),
+            change_index: HashMap::new(),
             changed_dirs: HashMap::new(),
             violations: Vec::new(),
             tree: FileTree::default(),
@@ -356,6 +359,7 @@ impl Workspace {
                 *self.changed_dirs.entry(dir.to_owned()).or_default() += 1;
             }
         }
+        self.change_index = changes.iter().enumerate().map(|(ix, c)| (c.path.clone(), ix)).collect();
         self.changes = changes;
         self.show_selected(cx);
         let before: HashSet<String> = self.violations.iter().cloned().collect();
@@ -508,7 +512,7 @@ impl Workspace {
     }
 
     fn change(&self, path: &str) -> Option<&Change> {
-        self.changes.iter().find(|c| c.path == path)
+        self.change_index.get(path).map(|&ix| &self.changes[ix])
     }
 
     fn revert(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
