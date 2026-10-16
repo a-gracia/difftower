@@ -23,10 +23,13 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 /// Keys the rest of the window binds that a terminal program must get:
-/// Tab completes, Ctrl+C interrupts.
+/// Tab completes, Ctrl+C interrupts, and the terminal handles its own
+/// Shift+Insert and Ctrl+Insert, which is how Omarchy's Super+V and
+/// Super+C paste and copy in a terminal.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys(
-        ["tab", "shift-tab", "ctrl-c", "alt-z"].map(|key| KeyBinding::new(key, NoAction {}, Some("Terminal"))),
+        ["tab", "shift-tab", "ctrl-c", "alt-z", "shift-insert", "ctrl-insert"]
+            .map(|key| KeyBinding::new(key, NoAction {}, Some("Terminal"))),
     );
 }
 
@@ -234,11 +237,15 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if mods.control && mods.shift && keystroke.key == "v" {
+        let paste = (mods.control && mods.shift && keystroke.key == "v")
+            || (mods.shift && !mods.control && keystroke.key == "insert");
+        let copy = (mods.control && mods.shift && keystroke.key == "c")
+            || (mods.control && !mods.shift && keystroke.key == "insert");
+        if paste {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 self.paste(&text);
             }
-        } else if mods.control && mods.shift && keystroke.key == "c" {
+        } else if copy {
             if let Some(text) = self.term.lock().selection_to_string() {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
@@ -564,7 +571,9 @@ fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         }
     };
     let bytes = match keystroke.key.as_str() {
-        "enter" => if mods.alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() },
+        // Shift+Enter as Alt+Enter, as Claude Code's terminal setup does:
+        // agents take it as a new line instead of sending the message.
+        "enter" => if mods.alt || mods.shift { b"\x1b\r".to_vec() } else { b"\r".to_vec() },
         "backspace" => if mods.alt { b"\x1b\x7f".to_vec() } else if mods.control { b"\x08".to_vec() } else { b"\x7f".to_vec() },
         "tab" => if mods.shift { b"\x1b[Z".to_vec() } else { b"\t".to_vec() },
         "escape" => b"\x1b".to_vec(),
@@ -608,7 +617,7 @@ mod tests {
     // Not a glob: gpui's `test` attribute would shadow the standard one.
     use gpui_kit::Modifiers;
 
-    use super::wheel_report;
+    use super::{key_bytes, wheel_report};
 
     #[test]
     fn reports_the_wheel_as_a_mouse_button() {
@@ -620,5 +629,12 @@ mod tests {
         // The original encoding: each value offset by 32, positions one-based.
         assert_eq!(wheel_report(false, 9, 4, none, false), [0x1b, b'[', b'M', 32 + 65, 32 + 10, 32 + 5]);
         assert_eq!(wheel_report(true, 400, 0, none, false)[4], 255);
+    }
+
+    #[test]
+    fn shift_enter_is_a_new_line_not_a_send() {
+        let key = |modifiers| gpui_kit::Keystroke { modifiers, key: "enter".into(), key_char: None };
+        assert_eq!(key_bytes(&key(Modifiers::default()), false).unwrap(), b"\r");
+        assert_eq!(key_bytes(&key(Modifiers { shift: true, ..Modifiers::default() }), false).unwrap(), b"\x1b\r");
     }
 }

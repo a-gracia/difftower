@@ -51,6 +51,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-3", ShowProtected, None),
         KeyBinding::new("ctrl-4", ShowTests, None),
         KeyBinding::new("alt-z", ToggleWrap, None),
+        // The X convention, and what Omarchy's Super+C and Super+V send to
+        // windows it takes for terminals.
+        KeyBinding::new("ctrl-insert", gpui_kit::component::input::Copy, Some("Root")),
+        KeyBinding::new("ctrl-insert", gpui_kit::component::input::Copy, Some("Input")),
+        KeyBinding::new("shift-insert", gpui_kit::component::input::Paste, Some("Input")),
     ]);
 }
 
