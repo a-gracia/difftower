@@ -14,9 +14,37 @@ mod workspace;
 
 use home::Home;
 
+const USAGE: &str = "\
+Difftower: a control tower for coding agents.
+
+Usage:
+  difftower                     start screen with recent repositories
+  difftower <path>              open a repository, or a directory of them
+  difftower <user@host:path>    open one over SSH
+
+Options:
+  -h, --help       show this help
+  -V, --version    show the version
+";
+
 fn main() {
     // `difftower [path | user@host:path]`; with no argument, the start screen.
     let location = std::env::args().nth(1);
+    match location.as_deref() {
+        Some("-V" | "--version") => {
+            println!("difftower {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some("-h" | "--help") => {
+            print!("{USAGE}");
+            return;
+        }
+        Some(flag) if flag.starts_with('-') => {
+            eprint!("difftower: unknown option {flag}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+        _ => {}
+    }
 
     gpui_kit::application().with_assets(assets::Assets).run(move |cx| {
         gpui_kit::init(cx);
