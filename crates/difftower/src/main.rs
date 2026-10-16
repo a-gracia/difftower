@@ -50,6 +50,7 @@ fn main() {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         workspace::bind_keys(cx);
+        terminal::bind_keys(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
         let options = WindowOptions {

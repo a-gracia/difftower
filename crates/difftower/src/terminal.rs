@@ -22,6 +22,14 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// Keys the rest of the window binds that a terminal program must get:
+/// Tab completes, Ctrl+C interrupts.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys(
+        ["tab", "shift-tab", "ctrl-c", "alt-z"].map(|key| KeyBinding::new(key, NoAction {}, Some("Terminal"))),
+    );
+}
+
 const FONT_SIZE: f32 = 13.;
 const LINE_HEIGHT: f32 = 1.3;
 
@@ -65,6 +73,8 @@ pub struct TerminalView {
     focus: FocusHandle,
     size: (usize, usize),
     cell: Size<Pixels>,
+    /// Where the grid starts on screen, to place mouse reports.
+    origin: Point<Pixels>,
     title: Option<SharedString>,
     session: Session,
     started: Instant,
@@ -100,6 +110,7 @@ impl TerminalView {
                 focus: cx.focus_handle(),
                 size,
                 cell: Size::default(),
+                origin: Point::default(),
                 title: None,
                 session: Session::Running,
                 started: Instant::now(),
@@ -247,11 +258,27 @@ impl TerminalView {
             return;
         }
         let mut term = self.term.lock();
-        if term.mode().contains(TermMode::ALT_SCREEN) {
-            // Full-screen programs scroll with arrow keys.
-            let key = if lines > 0 { "\x1bOA" } else { "\x1bOB" };
+        let mode = *term.mode();
+        let count = lines.unsigned_abs() as usize;
+        // As other terminals do: a program that asked for the mouse gets the
+        // wheel, and Shift keeps it for the scrollback.
+        if mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
             drop(term);
-            self.write(key.repeat(lines.unsigned_abs() as usize).into_bytes());
+            let col = ((event.position.x - self.origin.x) / self.cell.width).floor().max(0.) as usize;
+            let row = ((event.position.y - self.origin.y) / self.cell.height).floor().max(0.) as usize;
+            let (col, row) = (col.min(self.size.0.saturating_sub(1)), row.min(self.size.1.saturating_sub(1)));
+            let report = wheel_report(lines > 0, col, row, event.modifiers, mode.contains(TermMode::SGR_MOUSE));
+            self.write(report.repeat(count));
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) && !event.modifiers.shift {
+            // Full-screen programs that did not ask for the mouse scroll with arrows.
+            let key: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            drop(term);
+            self.write(key.repeat(count));
         } else {
             term.scroll_display(Scroll::Delta(lines));
         }
@@ -303,7 +330,11 @@ impl Render for TerminalView {
                     move |bounds, _, cx| {
                         let cols = (bounds.size.width / cell.width).floor() as usize;
                         let rows = (bounds.size.height / cell.height).floor() as usize;
-                        this.update(cx, |this, _| this.resize(cols, rows, cell)).ok();
+                        this.update(cx, |this, _| {
+                            this.origin = bounds.origin;
+                            this.resize(cols, rows, cell)
+                        })
+                        .ok();
                     },
                     move |bounds, _, window, cx| {
                         paint_grid(&term.lock(), bounds.origin, cell, &font, font_size, &palette, focused, window, cx);
@@ -498,6 +529,28 @@ fn window_size((cols, rows): (usize, usize), cell: Size<Pixels>) -> WindowSize {
     }
 }
 
+/// One wheel notch as a mouse report, at zero-based `col` and `row`: in the
+/// SGR encoding when the program asked for it, else the original one, which
+/// cannot reach past column 223.
+fn wheel_report(up: bool, col: usize, row: usize, mods: Modifiers, sgr: bool) -> Vec<u8> {
+    let mut button = if up { 64 } else { 65 };
+    if mods.shift {
+        button += 4;
+    }
+    if mods.alt {
+        button += 8;
+    }
+    if mods.control {
+        button += 16;
+    }
+    if sgr {
+        format!("\x1b[<{button};{};{}M", col + 1, row + 1).into_bytes()
+    } else {
+        let at = |n: usize| (32 + 1 + n).min(255) as u8;
+        vec![0x1b, b'[', b'M', 32 + button as u8, at(col), at(row)]
+    }
+}
+
 /// Translates a keystroke into the bytes a terminal program expects.
 fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
     let mods = keystroke.modifiers;
@@ -548,4 +601,24 @@ fn key_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec<u8>> {
         }
     };
     Some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    // Not a glob: gpui's `test` attribute would shadow the standard one.
+    use gpui_kit::Modifiers;
+
+    use super::wheel_report;
+
+    #[test]
+    fn reports_the_wheel_as_a_mouse_button() {
+        let none = Modifiers::default();
+        assert_eq!(wheel_report(true, 0, 0, none, true), b"\x1b[<64;1;1M");
+        assert_eq!(wheel_report(false, 9, 4, none, true), b"\x1b[<65;10;5M");
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        assert_eq!(wheel_report(true, 0, 0, ctrl, true), b"\x1b[<80;1;1M");
+        // The original encoding: each value offset by 32, positions one-based.
+        assert_eq!(wheel_report(false, 9, 4, none, false), [0x1b, b'[', b'M', 32 + 65, 32 + 10, 32 + 5]);
+        assert_eq!(wheel_report(true, 400, 0, none, false)[4], 255);
+    }
 }
