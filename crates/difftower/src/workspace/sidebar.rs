@@ -151,6 +151,7 @@ impl Workspace {
             None => (String::new(), relative.to_owned()),
         };
         let (letter, color) = status_style(change.status, cx);
+        let (added, removed) = self.change_counts.get(ix).copied().unwrap_or_default();
         let selected = self.selected.as_deref() == Some(&path);
         h_flex()
             .id(("change", ix))
@@ -175,6 +176,14 @@ impl Workspace {
             .when(self.violations.contains(&path), |el| {
                 el.child(Icon::new(Lucide::ShieldAlert).small().text_color(theme.danger))
             })
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .text_size(DETAIL_SIZE)
+                    .when(added > 0, |el| el.child(div().text_color(theme.green).child(format!("+{added}"))))
+                    .when(removed > 0, |el| el.child(div().text_color(theme.red).child(format!("−{removed}")))),
+            )
             .child(div().w_3().flex_none().text_size(DETAIL_SIZE).font_semibold().text_color(color).child(letter))
             .on_click(cx.listener(move |this, _, window, cx| this.open(&path, window, cx)))
             .into_any_element()

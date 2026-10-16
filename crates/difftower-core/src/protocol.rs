@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Change, Runner, TestEvent, TestTarget};
 
 /// Bumped whenever a message changes shape.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Call {

@@ -1,4 +1,5 @@
 mod diff_view;
+mod finder;
 mod main_panel;
 mod sidebar;
 mod test_panel;
@@ -16,7 +17,7 @@ use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
-    diff::{DiffFile, DiffMode, DiffState},
+    diff::{DiffFile, DiffLinePosition, DiffMode, DiffSide, DiffState},
     h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,10 +29,22 @@ use crate::{
     terminal::{TerminalCommand, TerminalView},
 };
 
-gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap]);
+gpui_kit::actions!(
+    workspace,
+    [ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap, NextFile, PreviousFile, NextChange, PreviousChange, FindFile]
+);
+
+/// Where single letters navigate: not while typing in the terminal or a
+/// search field.
+const NAVIGATION: &str = "Workspace && !Terminal && !Command";
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("j", NextFile, Some(NAVIGATION)),
+        KeyBinding::new("k", PreviousFile, Some(NAVIGATION)),
+        KeyBinding::new("n", NextChange, Some(NAVIGATION)),
+        KeyBinding::new("p", PreviousChange, Some(NAVIGATION)),
+        KeyBinding::new("ctrl-p", FindFile, Some(NAVIGATION)),
         KeyBinding::new("ctrl-1", ShowChanges, None),
         KeyBinding::new("ctrl-2", ShowFiles, None),
         KeyBinding::new("ctrl-3", ShowProtected, None),
@@ -83,6 +96,8 @@ pub struct Workspace {
     backend: Arc<dyn Backend>,
     guard: Guard,
     changes: Vec<Change>,
+    /// Lines added and removed in each change, in the same order.
+    change_counts: Vec<(usize, usize)>,
     /// Number of changed files below each directory.
     changed_dirs: HashMap<String, usize>,
     /// Changed files that a protection rule covers; committing or reverting
@@ -117,6 +132,15 @@ pub struct Workspace {
     _preview_task: Option<Task<()>>,
     terminal: Option<Entity<TerminalView>>,
     main_panel: Option<Entity<main_panel::MainPanel>>,
+    /// Holds the keyboard when neither the terminal nor a field does.
+    focus_handle: FocusHandle,
+    /// The window has the user's attention; notifications wait otherwise.
+    window_active: bool,
+    /// The first status arrived; changes after it may notify.
+    loaded: bool,
+    /// A line to scroll to once the file being opened shows.
+    pending_line: Option<(String, usize)>,
+    finder: Option<finder::Finder>,
     selected: Option<String>,
     error: Option<SharedString>,
     refreshing: Option<Task<()>>,
@@ -168,10 +192,12 @@ impl Workspace {
             view.focus_handle(cx).focus(window, cx);
         }
 
+        let backend_key = (backend.host().unwrap_or_default(), backend.root());
         let mut this = Self {
             backend,
             guard: Guard::empty(),
             changes: Vec::new(),
+            change_counts: Vec::new(),
             changed_dirs: HashMap::new(),
             violations: Vec::new(),
             tree: FileTree::default(),
@@ -184,7 +210,7 @@ impl Workspace {
             tab: SidebarTab::Changes,
             collapsed_repos: HashSet::new(),
             expanded_rules: HashSet::new(),
-            tests: test_panel::Tests::default(),
+            tests: test_panel::Tests::load(&format!("{}:{}", backend_key.0, backend_key.1)),
             diff,
             settings,
             dragging: None,
@@ -195,6 +221,11 @@ impl Workspace {
             _preview_task: None,
             terminal,
             main_panel: None,
+            focus_handle: cx.focus_handle(),
+            window_active: true,
+            loaded: false,
+            pending_line: None,
+            finder: None,
             selected: None,
             error,
             refreshing: None,
@@ -266,7 +297,8 @@ impl Workspace {
             self.error = Some(format!("Invalid .difftower.toml: {err}").into());
         }
 
-        self.totals = changes.iter().map(|c| line_counts(&c.patch)).fold((0, 0), |(a, d), (ca, cd)| (a + ca, d + cd));
+        self.change_counts = changes.iter().map(|c| line_counts(&c.patch)).collect();
+        self.totals = self.change_counts.iter().fold((0, 0), |(a, d), (ca, cd)| (a + ca, d + cd));
 
         let files_hash = hash(&files.join("\0"));
         if files_hash != self.files_hash {
@@ -284,8 +316,78 @@ impl Workspace {
         }
         self.changes = changes;
         self.show_selected(cx);
+        let before: HashSet<String> = self.violations.iter().cloned().collect();
         self.update_violations();
         self.update_protection();
+        let new: Vec<&str> = self.violations.iter().filter(|v| !before.contains(*v)).map(String::as_str).collect();
+        if self.loaded && !new.is_empty() {
+            let names: Vec<&str> = new.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
+            let title = format!("Protected file{} modified", if new.len() == 1 { "" } else { "s" });
+            self.notify_user(&title, &names.join(", "));
+        }
+        self.loaded = true;
+    }
+
+    /// A desktop notification, when the window is not in front.
+    fn notify_user(&self, title: &str, body: &str) {
+        if self.window_active {
+            return;
+        }
+        let name = self.backend.name();
+        let _ = std::process::Command::new("notify-send")
+            .args(["--app-name=Difftower", &format!("{name}: {title}"), body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|mut child| std::thread::spawn(move || child.wait()));
+    }
+
+    /// Opens `path`, scrolled to `line` when given.
+    fn open_at(&mut self, path: &str, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_line = line.map(|line| (path.to_owned(), line as usize));
+        self.open(path, window, cx);
+        // Already showing: the diff will not reload, so scroll now.
+        if self.shown.as_ref().is_some_and(|(shown, _)| shown == path) && self.preview.is_none() {
+            let diff = self.diff.clone();
+            self.scroll_to_pending(&diff, cx);
+        }
+    }
+
+    /// Scrolls `state` to the pending line if it shows that file.
+    fn scroll_to_pending(&mut self, state: &Entity<DiffState>, cx: &mut Context<Self>) {
+        let Some((path, line)) = self.pending_line.clone() else { return };
+        if !state.read(cx).files().iter().any(|f| f.path() == path.as_str()) {
+            return;
+        }
+        self.pending_line = None;
+        state.update(cx, |state, cx| state.scroll_to_line(DiffLinePosition::new(path, DiffSide::Modified, line), cx));
+    }
+
+    /// Moves the selection to the next or previous changed file.
+    fn step_file(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.changes.is_empty() {
+            return;
+        }
+        let current = self.selected.as_deref().and_then(|path| self.changes.iter().position(|c| c.path == path));
+        let next = match (current, forward) {
+            (None, true) => 0,
+            (None, false) => self.changes.len() - 1,
+            (Some(ix), true) => (ix + 1).min(self.changes.len() - 1),
+            (Some(ix), false) => ix.saturating_sub(1),
+        };
+        let path = self.changes[next].path.clone();
+        self.open(&path, window, cx);
+    }
+
+    fn step_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let state = match &self.preview {
+            Some(preview) => preview.state.clone(),
+            None => Some(self.diff.clone()),
+        };
+        if let Some(state) = state {
+            state.update(cx, |state, cx| if forward { state.next_change(cx) } else { state.previous_change(cx) });
+        }
     }
 
     /// Recounts protected files per directory; call when files or rules change.
@@ -443,6 +545,8 @@ impl Workspace {
                     Ok(files) => this.diff.update(cx, |diff, cx| diff.set_files(files, cx)),
                     Err(err) => this.error = Some(format!("Could not parse the diff: {}", err.message()).into()),
                 }
+                let diff = this.diff.clone();
+                this.scroll_to_pending(&diff, cx);
                 cx.notify();
             })
             .ok();
@@ -482,12 +586,14 @@ impl Workspace {
                         let text = String::from_utf8_lossy(&bytes);
                         let file = DiffFile::unchanged(path.clone(), &text);
                         let state = cx.new(|cx| DiffState::new([file], cx));
+                        let target = state.clone();
                         // Its highlighting arrives later and must show.
                         if let Some(panel) = &this.main_panel {
                             let panel = panel.clone();
                             cx.observe(&state, move |_, _, cx| panel.update(cx, |panel, cx| panel.invalidate(cx))).detach();
                         }
                         preview.state = Some(state);
+                        this.scroll_to_pending(&target, cx);
                     }
                 }
                 cx.notify();
@@ -642,6 +748,14 @@ impl Workspace {
                     .child("vs HEAD"),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("find-file")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(Lucide::Search))
+                    .tooltip("Go to file (Ctrl+P)")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_finder(window, cx))),
+            )
             .child(if self.tests.running() {
                 Button::new("run-tests")
                     .small()
@@ -782,6 +896,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::profile::frame_start();
+        self.window_active = window.is_window_active();
         // The side panels keep the width the user gave them; the diff takes
         // the rest. In a window too narrow for all three, the terminal and
         // then the file list give way without changing the saved widths.
@@ -796,11 +911,19 @@ impl Render for Workspace {
             terminal_width -= from_terminal;
             sidebar_width = (sidebar_width - (overflow - from_terminal)).max(MIN_SIDEBAR_WIDTH);
         }
+        let finder = self.render_finder(window, cx);
         let theme = cx.theme();
         v_flex()
             .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context("Workspace")
             .bg(theme.background)
             .text_color(theme.foreground)
+            .on_action(cx.listener(|this, _: &NextFile, window, cx| this.step_file(true, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousFile, window, cx| this.step_file(false, window, cx)))
+            .on_action(cx.listener(|this, _: &NextChange, _, cx| this.step_change(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousChange, _, cx| this.step_change(false, cx)))
+            .on_action(cx.listener(|this, _: &FindFile, window, cx| this.open_finder(window, cx)))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show_tab(SidebarTab::Changes, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_tab(SidebarTab::Files, cx)))
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))
@@ -817,10 +940,23 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .child(div().flex_none().w(px(sidebar_width)).h_full().child(self.render_sidebar(cx)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(sidebar_width))
+                            .h_full()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_workspace(window, cx)))
+                            .child(self.render_sidebar(cx)),
+                    )
                     .child(self.render_divider(Divider::Sidebar, cx))
                     .child(
-                        div().flex_1().min_w_0().h_full().overflow_hidden().children(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus_workspace(window, cx)))
+                            .children(
                             self.main_panel
                                 .clone()
                                 .map(|panel| AnyView::from(panel).cached(StyleRefinement::default().size_full())),
@@ -833,6 +969,7 @@ impl Render for Workspace {
                     }),
             )
             .child(self.render_status_bar(cx))
+            .children(finder)
             // Painted last: the end of the frame for DIFFTOWER_PROFILE.
             .child(canvas(|_, _, _| {}, |_, _, _, _| crate::profile::frame_end()).absolute().size_0())
     }

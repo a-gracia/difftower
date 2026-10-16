@@ -9,7 +9,8 @@ use std::{
     rc::Rc,
 };
 
-use difftower_core::{Outcome, Runner, TestEvent, TestSuite, TestTarget};
+use difftower_core::{CaseRef, Outcome, Runner, TestEvent, TestSuite, TestTarget};
+use serde::{Deserialize, Serialize};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
@@ -30,7 +31,7 @@ const INDENT: f32 = 8.;
 const OUTPUT_LIMIT: usize = 50_000;
 
 /// Where a test stands after the last run that covered it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Status {
     Running,
     Passed,
@@ -66,15 +67,28 @@ struct Row {
     expanded: bool,
 }
 
+#[derive(Clone, Copy)]
+enum AfterListing {
+    All,
+    Failed,
+    Changed,
+}
+
 pub(super) struct Tests {
     suites: Vec<TestSuite>,
     /// The suites were listed at least once.
     listed: bool,
     listing: bool,
-    /// Run everything once the listing in progress is done.
-    run_after_listing: bool,
+    /// What to run once the listing in progress is done.
+    after_listing: Option<AfterListing>,
     _list_task: Option<Task<()>>,
     status: HashMap<String, Status>,
+    /// What the runner said about each failed test.
+    details: HashMap<String, Vec<SharedString>>,
+    /// The failed test whose details the output shows instead of the log.
+    focus: Option<String>,
+    /// Where results are kept between sessions.
+    store: Option<std::path::PathBuf>,
     output: Vec<SharedString>,
     queue: VecDeque<Job>,
     current: Option<Job>,
@@ -99,9 +113,12 @@ impl Default for Tests {
             suites: Vec::new(),
             listed: false,
             listing: false,
-            run_after_listing: false,
+            after_listing: None,
             _list_task: None,
             status: HashMap::new(),
+            details: HashMap::new(),
+            focus: None,
+            store: None,
             output: Vec::new(),
             queue: VecDeque::new(),
             current: None,
@@ -117,7 +134,57 @@ impl Default for Tests {
     }
 }
 
+/// Results as kept between sessions.
+#[derive(Default, Serialize, Deserialize)]
+struct Stored {
+    status: HashMap<String, Status>,
+    details: HashMap<String, Vec<String>>,
+}
+
 impl Tests {
+    /// Tests with the results of the last session on the same repository,
+    /// `key` naming it, such as `host:/path`.
+    pub fn load(key: &str) -> Self {
+        let store = results_dir().map(|dir| dir.join(format!("{:016x}.json", fnv(key.as_bytes()))));
+        let stored: Stored = store
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            status: stored.status,
+            details: stored
+                .details
+                .into_iter()
+                .map(|(id, lines)| (id, lines.into_iter().map(SharedString::from).collect()))
+                .collect(),
+            store,
+            ..Self::default()
+        }
+    }
+
+    fn save(&self) {
+        let Some(path) = &self.store else { return };
+        let stored = Stored {
+            status: self.status.iter().filter(|(_, s)| **s != Status::Running).map(|(id, s)| (id.clone(), *s)).collect(),
+            details: self
+                .details
+                .iter()
+                .map(|(id, lines)| (id.clone(), lines.iter().map(|l| l.to_string()).collect()))
+                .collect(),
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_vec(&stored) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    fn in_current_job(&self, id: &str) -> bool {
+        self.current.as_ref().is_some_and(|job| job.ids.iter().any(|i| i == id))
+    }
+
     pub fn running(&self) -> bool {
         self.current.is_some() || !self.queue.is_empty()
     }
@@ -262,8 +329,11 @@ impl Workspace {
                     }
                     Err(err) => this.error = Some(format!("Could not list the tests: {err:#}").into()),
                 }
-                if std::mem::take(&mut this.tests.run_after_listing) {
-                    this.run_all_tests(cx);
+                match this.tests.after_listing.take() {
+                    Some(AfterListing::All) => this.run_all_tests(cx),
+                    Some(AfterListing::Failed) => this.rerun_failed_tests(cx),
+                    Some(AfterListing::Changed) => this.run_changed_tests(cx),
+                    None => {}
                 }
                 cx.notify();
             })
@@ -281,7 +351,7 @@ impl Workspace {
 
     pub(super) fn run_all_tests(&mut self, cx: &mut Context<Self>) {
         if !self.tests.listed {
-            self.tests.run_after_listing = true;
+            self.tests.after_listing = Some(AfterListing::All);
             self.list_tests(cx);
             return;
         }
@@ -295,15 +365,91 @@ impl Workspace {
         let (target, ids) = match kind {
             RowKind::Suite => (TestTarget::All, tests.ids_under(suite, "").map(str::to_owned).collect()),
             RowKind::Dir | RowKind::File => (
-                TestTarget::Path { path: path.to_owned() },
+                TestTarget::Paths { paths: vec![path.to_owned()] },
                 tests.ids_under(suite, path).map(str::to_owned).collect(),
             ),
             RowKind::Case(ix) => {
                 let case = &s.tests[ix];
-                (TestTarget::Case { id: case.id.clone(), line: case.line }, vec![case.id.clone()])
+                (TestTarget::Cases { cases: vec![CaseRef { id: case.id.clone(), line: case.line }] }, vec![case.id.clone()])
             }
         };
         Job { repo: s.repo.clone(), runner: s.runner, target, ids }
+    }
+
+    /// One job per suite running `ids` among its tests.
+    fn case_jobs(&self, ids: &HashSet<&str>) -> Vec<Job> {
+        self.tests
+            .suites
+            .iter()
+            .filter_map(|suite| {
+                let cases: Vec<CaseRef> = suite
+                    .tests
+                    .iter()
+                    .filter(|t| ids.contains(t.id.as_str()))
+                    .map(|t| CaseRef { id: t.id.clone(), line: t.line })
+                    .collect();
+                (!cases.is_empty()).then(|| Job {
+                    repo: suite.repo.clone(),
+                    runner: suite.runner,
+                    ids: cases.iter().map(|c| c.id.clone()).collect(),
+                    target: TestTarget::Cases { cases },
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn rerun_failed_tests(&mut self, cx: &mut Context<Self>) {
+        if !self.tests.listed {
+            self.tests.after_listing = Some(AfterListing::Failed);
+            self.list_tests(cx);
+            return;
+        }
+        let failed: HashSet<&str> =
+            self.tests.status.iter().filter(|(_, s)| **s == Status::Failed).map(|(id, _)| id.as_str()).collect();
+        let jobs = self.case_jobs(&failed);
+        if !jobs.is_empty() {
+            self.run_jobs(jobs, cx);
+        }
+    }
+
+    /// Runs the test files among the changes, and the tests named after a
+    /// changed file: `user.rb` brings `user_test.rb`, `test_user.py` or
+    /// `user.test.ts`.
+    pub(super) fn run_changed_tests(&mut self, cx: &mut Context<Self>) {
+        if !self.tests.listed {
+            self.tests.after_listing = Some(AfterListing::Changed);
+            self.list_tests(cx);
+            return;
+        }
+        let changed: Vec<&str> = self.changes.iter().map(|c| c.path.as_str()).collect();
+        let stems: HashSet<String> = changed.iter().map(|path| test_stem(path)).collect();
+        let jobs: Vec<Job> = self
+            .tests
+            .suites
+            .iter()
+            .filter_map(|suite| {
+                let mut files: Vec<String> = suite
+                    .tests
+                    .iter()
+                    .map(|t| t.file.as_str())
+                    .filter(|file| changed.contains(file) || stems.contains(&test_stem(file)))
+                    .map(str::to_owned)
+                    .collect();
+                files.dedup();
+                (!files.is_empty()).then(|| Job {
+                    repo: suite.repo.clone(),
+                    runner: suite.runner,
+                    ids: suite.tests.iter().filter(|t| files.contains(&t.file)).map(|t| t.id.clone()).collect(),
+                    target: TestTarget::Paths { paths: files },
+                })
+            })
+            .collect();
+        if jobs.is_empty() {
+            self.error = Some("No tests match the changed files".into());
+            cx.notify();
+            return;
+        }
+        self.run_jobs(jobs, cx);
     }
 
     /// Stops whatever runs and runs `jobs` one after another.
@@ -314,9 +460,11 @@ impl Workspace {
         for job in &tests.queue {
             for id in &job.ids {
                 tests.status.insert(id.clone(), Status::Running);
+                tests.details.remove(id);
             }
         }
         tests.output.clear();
+        tests.focus = None;
         tests.show_output = true;
         self.start_next_job(cx);
     }
@@ -338,17 +486,24 @@ impl Workspace {
 
     fn start_next_job(&mut self, cx: &mut Context<Self>) {
         let Some(job) = self.tests.queue.pop_front() else {
-            self.tests.current = None;
-            self.tests._run_task = None;
-            // New or renamed tests show after a run.
-            self.list_tests(cx);
+            let was_running = self.tests._run_task.take().is_some();
+            if was_running {
+                self.tests.save();
+                let failed = self.tests.failed();
+                if failed > 0 {
+                    self.notify_user(&format!("{failed} test{} failed", if failed == 1 { "" } else { "s" }), "");
+                }
+                // New or renamed tests show after a run.
+                self.list_tests(cx);
+            }
             return;
         };
         let repo_label = if job.repo.is_empty() { self.backend.name() } else { job.repo.clone() };
         let what = match &job.target {
             TestTarget::All => "all tests".to_owned(),
-            TestTarget::Path { path } => path.clone(),
-            TestTarget::Case { id, .. } => id.clone(),
+            TestTarget::Paths { paths } => paths.join(", "),
+            TestTarget::Cases { cases } if cases.len() == 1 => cases[0].id.clone(),
+            TestTarget::Cases { cases } => format!("{} tests", cases.len()),
         };
         self.tests.push_output(format!("▶ {repo_label} · {}: {what}", job.runner.label()));
         let (repo, runner, target) = (job.repo.clone(), job.runner, job.target.clone());
@@ -403,6 +558,9 @@ impl Workspace {
         for event in events {
             match event {
                 TestEvent::Output { line } => self.tests.push_output(line),
+                // Runners report more than they were asked for, such as the
+                // rest of a file as skipped; those keep their last result.
+                TestEvent::Result { id, .. } | TestEvent::Failure { id, .. } if !self.tests.in_current_job(&id) => {}
                 TestEvent::Result { id, outcome } => {
                     let status = match outcome {
                         Outcome::Passed => Status::Passed,
@@ -410,6 +568,9 @@ impl Workspace {
                         Outcome::Skipped => Status::Skipped,
                     };
                     self.tests.status.insert(id, status);
+                }
+                TestEvent::Failure { id, lines } => {
+                    self.tests.details.insert(id, lines.into_iter().map(SharedString::from).collect());
                 }
                 TestEvent::Finished { success } => {
                     finished = true;
@@ -488,6 +649,26 @@ impl Workspace {
                 let total: usize = tests.suites.iter().map(|s| s.tests.len()).sum();
                 format!("{total} test{}", if total == 1 { "" } else { "s" })
             }))
+            .when(!running && tests.failed() > 0, |el| {
+                el.child(
+                    Button::new("tests-rerun-failed")
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(Lucide::RotateCcw).text_color(theme.danger))
+                        .tooltip("Run the failed tests again")
+                        .on_click(cx.listener(|this, _, _, cx| this.rerun_failed_tests(cx))),
+                )
+            })
+            .when(!running, |el| {
+                el.child(
+                    Button::new("tests-changed")
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(Lucide::FileDiff))
+                        .tooltip("Run the tests of the changed files")
+                        .on_click(cx.listener(|this, _, _, cx| this.run_changed_tests(cx))),
+                )
+            })
             .child(
                 Button::new("tests-output")
                     .xsmall()
@@ -646,9 +827,17 @@ impl Workspace {
         .on_click(cx.listener(move |this, _, window, cx| {
             let Some(row) = this.tests.rows.get(ix) else { return };
             match row.kind {
-                RowKind::Case(_) => {
-                    let path = row.path.clone();
-                    this.open(&path, window, cx);
+                RowKind::Case(case) => {
+                    let test = &this.tests.suites[row.suite].tests[case];
+                    let (id, path, line) = (test.id.clone(), row.path.clone(), test.line);
+                    if this.tests.details.contains_key(&id) {
+                        this.tests.focus = Some(id);
+                        this.tests.version += 1;
+                        this.tests.show_output = true;
+                        cx.notify();
+                    } else {
+                        this.open_at(&path, line, window, cx);
+                    }
                 }
                 RowKind::Suite if error.is_some() => {
                     let error = error.clone().unwrap_or_default();
@@ -664,65 +853,99 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// The runner's output in the center panel.
+    /// The runner's output in the center panel, or what it said about one
+    /// failed test.
     pub(super) fn render_test_output(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let tests = &self.tests;
         let running = tests.running();
         let (passed, failed) = (tests.count(Status::Passed), tests.failed());
-        v_flex()
-            .size_full()
+        let focused = tests.focus.as_ref().and_then(|id| {
+            let case = tests.suites.iter().flat_map(|s| &s.tests).find(|t| &t.id == id);
+            Some((id.clone(), tests.details.get(id)?.clone(), case.cloned()))
+        });
+        let lines: Rc<Vec<SharedString>> = Rc::new(match &focused {
+            Some((_, lines, _)) => lines.clone(),
+            None => tests.output.clone(),
+        });
+        let title: SharedString = match &focused {
+            Some((id, _, case)) => case.as_ref().map_or(id.clone(), |c| format!("{} · {}", c.file, c.name)).into(),
+            None if running => "Running tests…".into(),
+            None => "Test output".into(),
+        };
+        let header = h_flex()
+            .h_8()
+            .px_3()
+            .gap_2()
+            .text_sm()
+            .border_b_1()
+            .border_color(theme.border)
             .child(
-                h_flex()
-                    .h_8()
-                    .px_3()
-                    .gap_2()
-                    .text_sm()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(Icon::new(Lucide::FlaskConical).xsmall().text_color(theme.muted_foreground))
-                    .child(div().flex_1().truncate().child(if running { "Running tests…" } else { "Test output" }))
-                    .child(div().text_xs().text_color(theme.success).child(format!("{passed} passed")))
-                    .when(failed > 0, |el| el.child(div().text_xs().text_color(theme.danger).child(format!("{failed} failed"))))
-                    .child(
-                        Button::new("close-output")
+                Icon::new(if focused.is_some() { Lucide::CircleX } else { Lucide::FlaskConical })
+                    .xsmall()
+                    .text_color(if focused.is_some() { theme.danger } else { theme.muted_foreground }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(title));
+        let header = match focused {
+            Some((_, _, case)) => header
+                .when_some(case, |el, case| {
+                    let (path, line) = (case.file.clone(), case.line);
+                    el.child(
+                        Button::new("open-test")
                             .xsmall()
                             .ghost()
-                            .icon(IconName::ArrowLeft)
-                            .label("Changes")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.tests.show_output = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div().flex_1().min_h_0().font_family(crate::terminal::monospace_family()).text_size(px(12.)).child(
-                    uniform_list(
-                        "test-output",
-                        tests.output.len(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            let theme = cx.theme();
-                            range
-                                .map(|ix| {
-                                    let line = this.tests.output[ix].clone();
-                                    let color = line_color(&line, theme);
-                                    div()
-                                        .h(px(18.))
-                                        .px_3()
-                                        .whitespace_nowrap()
-                                        .text_color(color)
-                                        .child(line)
-                                        .into_any_element()
-                                })
-                                .collect::<Vec<_>>()
-                        }),
+                            .icon(IconName::File)
+                            .label("Open")
+                            .tooltip("Open the test in its file")
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_at(&path, line, window, cx))),
                     )
-                    .size_full()
-                    .py_1()
-                    .track_scroll(&tests.output_scroll),
+                })
+                .child(
+                    Button::new("all-output")
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(Lucide::ScrollText))
+                        .label("All output")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.tests.focus = None;
+                            this.tests.version += 1;
+                            cx.notify();
+                        })),
                 ),
-            )
+            None => header
+                .child(div().text_xs().text_color(theme.success).child(format!("{passed} passed")))
+                .when(failed > 0, |el| el.child(div().text_xs().text_color(theme.danger).child(format!("{failed} failed")))),
+        }
+        .child(
+            Button::new("close-output")
+                .xsmall()
+                .ghost()
+                .icon(IconName::ArrowLeft)
+                .label("Changes")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.tests.show_output = false;
+                    cx.notify();
+                })),
+        );
+        let list = uniform_list("test-output", lines.len(), {
+            let lines = lines.clone();
+            move |range: Range<usize>, _, cx: &mut App| {
+                let theme = cx.theme();
+                range
+                    .map(|ix| {
+                        let line = lines[ix].clone();
+                        div().h(px(18.)).px_3().whitespace_nowrap().text_color(line_color(&line, theme)).child(line).into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            }
+        })
+        .size_full()
+        .py_1();
+        let list = if tests.focus.is_none() { list.track_scroll(&tests.output_scroll) } else { list };
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(div().flex_1().min_h_0().font_family(crate::terminal::monospace_family()).text_size(px(12.)).child(list))
             .into_any_element()
     }
 
@@ -744,19 +967,60 @@ impl Workspace {
         } else {
             return None;
         };
+        let rerun = failed > 0 && !tests.running();
         Some(
             h_flex()
-                .id("test-status")
-                .gap_1p5()
-                .cursor_pointer()
-                .text_color(color)
-                .when(failed > 0 && !tests.running(), |el| el.font_semibold())
-                .child(Icon::new(icon).xsmall())
-                .child(label)
-                .on_click(cx.listener(|this, _, _, cx| this.show_test_output(cx)))
+                .gap_2()
+                .child(
+                    h_flex()
+                        .id("test-status")
+                        .gap_1p5()
+                        .cursor_pointer()
+                        .text_color(color)
+                        .when(rerun, |el| el.font_semibold())
+                        .child(Icon::new(icon).xsmall())
+                        .child(label)
+                        .on_click(cx.listener(|this, _, _, cx| this.show_test_output(cx))),
+                )
+                .when(rerun, |el| {
+                    el.child(
+                        Button::new("rerun-failed")
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(Lucide::RotateCcw))
+                            .label("Re-run failed")
+                            .on_click(cx.listener(|this, _, _, cx| this.rerun_failed_tests(cx))),
+                    )
+                })
                 .into_any_element(),
         )
     }
+}
+
+/// `$XDG_STATE_HOME/difftower/tests`, defaulting to `~/.local/state`.
+fn results_dir() -> Option<std::path::PathBuf> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".local/state")))?;
+    Some(state.join("difftower/tests"))
+}
+
+/// FNV-1a, stable across builds unlike `DefaultHasher`.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// A file's name without its directory, extension and test markers, so a
+/// source file and its tests share it: `app/models/user.rb`,
+/// `test/models/user_test.rb`, `tests/test_user.py` and `user.test.ts` all
+/// give `user`.
+fn test_stem(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut stem = name.split('.').next().unwrap_or(name);
+    for suffix in ["_test", "_spec"] {
+        stem = stem.strip_suffix(suffix).unwrap_or(stem);
+    }
+    stem.strip_prefix("test_").unwrap_or(stem).to_owned()
 }
 
 /// Failures in red and passes in green, as the runners print them.
@@ -787,7 +1051,7 @@ mod tests {
     use difftower_core::{Runner, TestCase, TestSuite};
 
     // Not a glob: gpui's `test` attribute would shadow the standard one.
-    use super::{Status, Tests};
+    use super::{Status, Tests, test_stem};
 
     fn case(file: &str, name: &str) -> TestCase {
         TestCase { id: format!("{file}::{name}"), file: file.into(), name: name.into(), line: None }
@@ -851,5 +1115,13 @@ mod tests {
         assert_eq!(calc(&tests), Some(Status::Failed));
         // `web/src/lib/calc` is not a prefix of a sibling like `calcx`.
         assert_eq!(tests.ids_under(0, "web/src/lib/cal").count(), 0);
+    }
+
+    #[test]
+    fn a_source_file_and_its_tests_share_a_stem() {
+        for path in ["app/models/user.rb", "test/models/user_test.rb", "tests/test_user.py", "src/user.test.ts", "user_spec.rb"] {
+            assert_eq!(test_stem(path), "user", "{path}");
+        }
+        assert_ne!(test_stem("app/models/users.rb"), "user");
     }
 }

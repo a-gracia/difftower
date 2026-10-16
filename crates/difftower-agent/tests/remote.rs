@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use difftower_core::{Backend, Outcome, Remote, Runner, SshTarget, TestEvent, TestTarget};
+use difftower_core::{Backend, CaseRef, Outcome, Remote, Runner, SshTarget, TestEvent, TestTarget};
 
 /// Tests point `HOME` and `DIFFTOWER_SSH` at their own directories.
 static ENV: Mutex<()> = Mutex::new(());
@@ -243,7 +243,7 @@ fn lists_and_runs_tests_on_the_host() {
             match rx.recv_timeout(Duration::from_secs(10)).expect("the run reports") {
                 TestEvent::Result { id, outcome } => results.push((id, outcome)),
                 TestEvent::Finished { success } => break success,
-                TestEvent::Output { .. } => {}
+                TestEvent::Output { .. } | TestEvent::Failure { .. } => {}
             }
         };
         drop(handle);
@@ -255,7 +255,7 @@ fn lists_and_runs_tests_on_the_host() {
         results,
         [("api/tests/a.py::test_ok".to_owned(), Outcome::Passed), ("api/tests/a.py::test_bad".to_owned(), Outcome::Failed)]
     );
-    let (results, success) = run(TestTarget::Case { id: "api/tests/a.py::test_ok".into(), line: None });
+    let (results, success) = run(TestTarget::Cases { cases: vec![CaseRef { id: "api/tests/a.py::test_ok".into(), line: None }] });
     assert!(success);
     assert_eq!(results, [("api/tests/a.py::test_ok".to_owned(), Outcome::Passed)]);
 }

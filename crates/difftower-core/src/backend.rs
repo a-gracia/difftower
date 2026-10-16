@@ -204,13 +204,16 @@ pub(crate) fn run_repo_tests(
     };
     let target = match target {
         TestTarget::All => TestTarget::All,
-        TestTarget::Path { path } => TestTarget::Path { path: unprefix(&path) },
-        TestTarget::Case { id, line } => TestTarget::Case { id: unprefix(&id), line },
+        TestTarget::Paths { paths } => TestTarget::Paths { paths: paths.iter().map(|p| unprefix(p)).collect() },
+        TestTarget::Cases { cases } => TestTarget::Cases {
+            cases: cases.into_iter().map(|c| testing::CaseRef { id: unprefix(&c.id), ..c }).collect(),
+        },
     };
     let prefix = name.to_owned();
     let on_event: OnTestEvent = Box::new(move |event| {
         on_event(match event {
             TestEvent::Result { id, outcome } => TestEvent::Result { id: join(&prefix, &id), outcome },
+            TestEvent::Failure { id, lines } => TestEvent::Failure { id: join(&prefix, &id), lines },
             event => event,
         })
     });
