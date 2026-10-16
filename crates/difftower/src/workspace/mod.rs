@@ -32,7 +32,10 @@ use crate::{
 
 gpui_kit::actions!(
     workspace,
-    [ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap, NextFile, PreviousFile, NextChange, PreviousChange, FindFile]
+    [
+        ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap, NextFile, PreviousFile, NextChange,
+        PreviousChange, FindFile, ToggleTerminalFocus, RunAllTests
+    ]
 );
 
 /// Where single letters navigate: not while typing in the terminal or a
@@ -51,6 +54,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-3", ShowProtected, None),
         KeyBinding::new("ctrl-4", ShowTests, None),
         KeyBinding::new("alt-z", ToggleWrap, None),
+        KeyBinding::new("ctrl-`", ToggleTerminalFocus, None),
+        KeyBinding::new("ctrl-shift-t", RunAllTests, None),
         // The X convention, and what Omarchy's Super+C and Super+V send to
         // windows it takes for terminals.
         KeyBinding::new("ctrl-insert", gpui_kit::component::input::Copy, Some("Root")),
@@ -685,6 +690,21 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Moves the keyboard between the terminal and the rest of the window,
+    /// showing the terminal if it was hidden.
+    fn toggle_terminal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.clone() else { return };
+        if terminal.focus_handle(cx).is_focused(window) {
+            self.focus_workspace(window, cx);
+        } else {
+            if !self.settings.show_terminal {
+                self.toggle_terminal(cx);
+            }
+            terminal.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
     fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
         self.settings.soft_wrap = !self.settings.soft_wrap;
         self.save_settings();
@@ -992,6 +1012,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NextChange, _, cx| this.step_change(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousChange, _, cx| this.step_change(false, cx)))
             .on_action(cx.listener(|this, _: &FindFile, window, cx| this.open_finder(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleTerminalFocus, window, cx| this.toggle_terminal_focus(window, cx)))
+            .on_action(cx.listener(|this, _: &RunAllTests, _, cx| {
+                this.run_all_tests(cx);
+                this.show_tab(SidebarTab::Tests, cx);
+            }))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show_tab(SidebarTab::Changes, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_tab(SidebarTab::Files, cx)))
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))

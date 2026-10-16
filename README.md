@@ -110,6 +110,8 @@ terminal keep their width and the diff takes the rest.
 | `j` / `k` | Next / previous changed file |
 | `n` / `p` | Next / previous change |
 | `Alt+Z` | Wrap long lines |
+| ``Ctrl+` `` | Move between the terminal and the diff |
+| `Ctrl+Shift+T` | Run every test |
 
 `Ctrl+P` and the single letters work when the focus is outside the terminal,
 which keeps them for the shell: click the file list or the diff first.
