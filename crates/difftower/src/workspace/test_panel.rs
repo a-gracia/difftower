@@ -87,8 +87,8 @@ pub(super) struct Tests {
     details: HashMap<String, Vec<SharedString>>,
     /// The failed test whose details the output shows instead of the log.
     focus: Option<String>,
-    /// Where results are kept between sessions.
-    store: Option<std::path::PathBuf>,
+    /// Names the repository whose results are kept between sessions.
+    store: Option<String>,
     output: Vec<SharedString>,
     queue: VecDeque<Job>,
     current: Option<Job>,
@@ -145,9 +145,7 @@ impl Tests {
     /// Tests with the results of the last session on the same repository,
     /// `key` naming it, such as `host:/path`.
     pub fn load(key: &str) -> Self {
-        let store = results_dir().map(|dir| dir.join(format!("{:016x}.json", fnv(key.as_bytes()))));
-        let stored: Stored = store
-            .as_ref()
+        let stored: Stored = super::session::state_file("tests", key)
             .and_then(|path| std::fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
@@ -158,13 +156,13 @@ impl Tests {
                 .into_iter()
                 .map(|(id, lines)| (id, lines.into_iter().map(SharedString::from).collect()))
                 .collect(),
-            store,
+            store: Some(key.to_owned()),
             ..Self::default()
         }
     }
 
     fn save(&self) {
-        let Some(path) = &self.store else { return };
+        let Some(key) = &self.store else { return };
         let stored = Stored {
             status: self.status.iter().filter(|(_, s)| **s != Status::Running).map(|(id, s)| (id.clone(), *s)).collect(),
             details: self
@@ -173,12 +171,7 @@ impl Tests {
                 .map(|(id, lines)| (id.clone(), lines.iter().map(|l| l.to_string()).collect()))
                 .collect(),
         };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_vec(&stored) {
-            let _ = std::fs::write(path, json);
-        }
+        super::session::write_state("tests", key, &stored);
     }
 
     fn in_current_job(&self, id: &str) -> bool {
@@ -995,19 +988,6 @@ impl Workspace {
                 .into_any_element(),
         )
     }
-}
-
-/// `$XDG_STATE_HOME/difftower/tests`, defaulting to `~/.local/state`.
-fn results_dir() -> Option<std::path::PathBuf> {
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".local/state")))?;
-    Some(state.join("difftower/tests"))
-}
-
-/// FNV-1a, stable across builds unlike `DefaultHasher`.
-fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// A file's name without its directory, extension and test markers, so a

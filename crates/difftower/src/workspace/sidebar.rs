@@ -199,6 +199,7 @@ impl Workspace {
         )
         .size_full()
         .py_1()
+        .track_scroll(&self.tree_scroll)
     }
 
     fn render_tree_row(&self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -416,16 +417,29 @@ impl Workspace {
                 .text_size(NAME_SIZE)
                 .hover(|el| el.bg(theme.list_hover))
                 .child(file_icons::icon(name))
+                // As in Changes: the name to read, then its folder, dimmed.
                 .child(
-                    div()
+                    h_flex()
                         .id(("covered", id))
                         .flex_1()
                         .min_w_0()
-                        .truncate()
+                        .overflow_hidden()
+                        .gap_1p5()
                         .cursor_pointer()
-                        .when(is_modified, |el| el.text_color(theme.danger))
-                        .hover(|el| el.underline())
-                        .child(path.clone())
+                        .child(
+                            div()
+                                .flex_none()
+                                .when(is_modified, |el| el.text_color(theme.danger))
+                                .hover(|el| el.underline())
+                                .child(name.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(DETAIL_SIZE)
+                                .text_color(theme.muted_foreground)
+                                .child(path.rsplit_once('/').map_or(String::new(), |(dir, _)| format!("{dir}/"))),
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| this.open(&open_path, window, cx))),
                 )
                 .when(is_modified, |el| {

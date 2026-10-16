@@ -1,6 +1,7 @@
 mod diff_view;
 mod finder;
 mod main_panel;
+mod session;
 mod sidebar;
 mod test_panel;
 
@@ -60,8 +61,9 @@ pub enum WorkspaceEvent {
 
 impl EventEmitter<WorkspaceEvent> for Workspace {}
 
-/// Narrowest the diff may get when panels are dragged wide.
-const MIN_DIFF_WIDTH: f32 = 240.;
+/// Narrowest the diff may get when panels are dragged wide, its minimap
+/// (about 100 px) included.
+const MIN_DIFF_WIDTH: f32 = 360.;
 const MIN_SIDEBAR_WIDTH: f32 = 160.;
 const MIN_TERMINAL_WIDTH: f32 = 240.;
 
@@ -81,6 +83,23 @@ enum SidebarTab {
     Files,
     Protected,
     Tests,
+}
+
+impl SidebarTab {
+    const ALL: [Self; 4] = [Self::Changes, Self::Files, Self::Protected, Self::Tests];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Changes => "changes",
+            Self::Files => "files",
+            Self::Protected => "protected",
+            Self::Tests => "tests",
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.name() == name)
+    }
 }
 
 /// An unchanged file opened from the tree.
@@ -113,12 +132,19 @@ pub struct Workspace {
     covered: Vec<Vec<String>>,
     expanded: HashSet<String>,
     rows: Rc<Vec<Row>>,
+    /// Scrolls the Files tab, to bring a restored file into view.
+    tree_scroll: UniformListScrollHandle,
     tab: SidebarTab,
     /// Rules whose covered files are listed in the Protected tab.
     expanded_rules: HashSet<String>,
     /// Repositories folded in the Changes tab of a multi-repository workspace.
     collapsed_repos: HashSet<String>,
     tests: test_panel::Tests,
+    /// The file open when this repository was last closed, opened once the
+    /// first status shows it still exists.
+    restore: Option<String>,
+    /// Names this repository for what is kept between sessions.
+    state_key: String,
     diff: Entity<DiffState>,
     /// Panel widths and diff layout, saved for the next session.
     settings: Settings,
@@ -196,7 +222,9 @@ impl Workspace {
             view.focus_handle(cx).focus(window, cx);
         }
 
-        let backend_key = (backend.host().unwrap_or_default(), backend.root());
+        let state_key = format!("{}:{}", backend.host().unwrap_or_default(), backend.root());
+        let session = session::Session::load(&state_key);
+        let tests = test_panel::Tests::load(&state_key);
         let mut this = Self {
             backend,
             guard: Guard::empty(),
@@ -209,12 +237,15 @@ impl Workspace {
             files_hash: 0,
             protection: HashMap::new(),
             covered: Vec::new(),
-            expanded: HashSet::new(),
+            expanded: session.expanded.into_iter().collect(),
             rows: Rc::default(),
-            tab: SidebarTab::Changes,
+            tree_scroll: UniformListScrollHandle::new(),
+            tab: session.tab.as_deref().and_then(SidebarTab::parse).unwrap_or(SidebarTab::Changes),
+            restore: session.selected,
+            state_key,
             collapsed_repos: HashSet::new(),
             expanded_rules: HashSet::new(),
-            tests: test_panel::Tests::load(&format!("{}:{}", backend_key.0, backend_key.1)),
+            tests,
             diff,
             settings,
             dragging: None,
@@ -280,7 +311,7 @@ impl Workspace {
                 match result {
                     Ok(status) => {
                         this.error = None;
-                        this.apply(status, cx);
+                        this.apply(status, window, cx);
                     }
                     Err(err) => this.error = Some(format!("{err:#}").into()),
                 }
@@ -293,7 +324,7 @@ impl Workspace {
         }));
     }
 
-    fn apply(&mut self, status: Status, cx: &mut Context<Self>) {
+    fn apply(&mut self, status: Status, window: &mut Window, cx: &mut Context<Self>) {
         let Status { changes, files, rules, rules_error } = status;
         match Guard::new(rules) {
             Ok(guard) => self.guard = guard,
@@ -332,6 +363,25 @@ impl Workspace {
             self.notify_user(&title, &names.join(", "));
         }
         self.loaded = true;
+        if let Some(path) = self.restore.take()
+            && (self.change(&path).is_some() || self.files.contains(&path))
+        {
+            // Shown in the tree too, its folders unfolded.
+            self.expanded.extend(file_tree::ancestors(&path).map(str::to_owned));
+            self.rebuild_rows();
+            if let Some(ix) = self.rows.iter().position(|row| row.path == path) {
+                self.tree_scroll.scroll_to_item(ix, ScrollStrategy::Center);
+            }
+            self.open(&path, window, cx);
+        }
+    }
+
+    /// Keeps the open file, the tab and the unfolded folders for next time.
+    fn save_session(&self) {
+        let mut expanded: Vec<String> = self.expanded.iter().cloned().collect();
+        expanded.sort();
+        session::Session { selected: self.selected.clone(), tab: Some(self.tab.name().to_owned()), expanded }
+            .save(&self.state_key);
     }
 
     /// A desktop notification, when the window is not in front.
@@ -508,6 +558,7 @@ impl Workspace {
             self.expanded.insert(path.to_owned());
         }
         self.rebuild_rows();
+        self.save_session();
         cx.notify();
     }
 
@@ -570,6 +621,7 @@ impl Workspace {
         } else {
             self.open_preview(path, window, cx);
         }
+        self.save_session();
         cx.notify();
     }
 
@@ -620,6 +672,7 @@ impl Workspace {
         if tab == SidebarTab::Tests {
             self.ensure_tests_listed(cx);
         }
+        self.save_session();
         cx.notify();
     }
 
