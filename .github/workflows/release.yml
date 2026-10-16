@@ -16,7 +16,7 @@ jobs:
     # the binary runs on.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -51,7 +51,7 @@ jobs:
           echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Upload the build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: difftower-linux
           path: dist/*.tar.gz*
