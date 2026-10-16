@@ -13,18 +13,18 @@ use gpui_kit::*;
 use super::Workspace;
 
 struct FileState {
-    reviewed: bool,
     /// Protected by any rule.
     protected: bool,
-    /// Protected and changed without the user's approval.
+    /// Protected and changed.
     violated: bool,
-    /// Protected, with the change accepted by the user.
-    accepted: bool,
 }
 
 impl Workspace {
     /// The center panel: a previewed file, or the diff of every change.
     pub(super) fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.tests.show_output {
+            return self.render_test_output(cx);
+        }
         match &self.preview {
             Some(preview) => self.render_preview(preview, cx),
             None => self.render_diff(cx),
@@ -99,10 +99,8 @@ impl Workspace {
                 .iter()
                 .map(|c| {
                     let state = FileState {
-                        reviewed: self.is_reviewed(c),
                         protected: self.guard.is_protected(&c.path),
                         violated: self.violations.contains(&c.path),
-                        accepted: self.accepted.contains(&c.path),
                     };
                     (c.path.clone(), state)
                 })
@@ -118,44 +116,15 @@ impl Workspace {
             .render_header_title_suffix(move |file, _, cx| {
                 let path = file.path().to_string();
                 let state = states.get(&path);
-                let reviewed = state.is_some_and(|s| s.reviewed);
                 let protected = state.is_some_and(|s| s.protected);
                 let violated = state.is_some_and(|s| s.violated);
-                let accepted = state.is_some_and(|s| s.accepted);
-                let (pin, revert, review, accept) = (this.clone(), this.clone(), this.clone(), this.clone());
-                let (pin_path, revert_path, review_path, accept_path) =
-                    (path.clone(), path.clone(), path.clone(), path.clone());
+                let (pin, revert) = (this.clone(), this.clone());
+                let (pin_path, revert_path) = (path.clone(), path.clone());
                 h_flex()
                     .gap_1()
                     .when(violated, |el| {
                         el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(cx.theme().danger))
-                            .child(
-                                Button::new("accept")
-                                    .xsmall()
-                                    .success()
-                                    .icon(IconName::Check)
-                                    .label("Accept")
-                                    .tooltip("This change to a protected file was intended")
-                                    .on_click(move |_, _, cx| {
-                                        let paths = [accept_path.clone()];
-                                        accept.update(cx, |this, cx| this.accept(&paths, cx)).ok();
-                                    }),
-                            )
                     })
-                    .when(accepted, |el| {
-                        el.child(Icon::new(Lucide::ShieldCheck).xsmall().text_color(cx.theme().success))
-                    })
-                    .child(
-                        Button::new("review")
-                            .xsmall()
-                            .when(reviewed, |b| b.success())
-                            .when(!reviewed, |b| b.outline())
-                            .icon(IconName::Check)
-                            .label("Reviewed")
-                            .on_click(move |_, _, cx| {
-                                review.update(cx, |this, cx| this.toggle_reviewed(&review_path, cx)).ok();
-                            }),
-                    )
                     .child(
                         Button::new("revert")
                             .xsmall()

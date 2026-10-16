@@ -1,6 +1,7 @@
 mod diff_view;
 mod main_panel;
 mod sidebar;
+mod test_panel;
 
 use std::{
     any::Any,
@@ -10,7 +11,7 @@ use std::{
     sync::Arc,
 };
 
-use difftower_core::{Approvals, Backend, Change, Guard, Status};
+use difftower_core::{Backend, Change, Guard, Status};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _,
@@ -27,13 +28,14 @@ use crate::{
     terminal::{TerminalCommand, TerminalView},
 };
 
-gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected, ToggleWrap]);
+gpui_kit::actions!(workspace, [ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-1", ShowChanges, None),
         KeyBinding::new("ctrl-2", ShowFiles, None),
         KeyBinding::new("ctrl-3", ShowProtected, None),
+        KeyBinding::new("ctrl-4", ShowTests, None),
         KeyBinding::new("alt-z", ToggleWrap, None),
     ]);
 }
@@ -65,6 +67,7 @@ enum SidebarTab {
     Changes,
     Files,
     Protected,
+    Tests,
 }
 
 /// An unchanged file opened from the tree.
@@ -74,24 +77,17 @@ struct Preview {
     message: Option<SharedString>,
 }
 
-/// One open repository: what changed against HEAD, and the review state the
-/// user builds up while reading it.
+/// One open repository: what changed against HEAD, its protected files and
+/// its tests.
 pub struct Workspace {
     backend: Arc<dyn Backend>,
     guard: Guard,
     changes: Vec<Change>,
     /// Number of changed files below each directory.
     changed_dirs: HashMap<String, usize>,
-    /// Changed files that a protection rule covers and the user has not accepted.
+    /// Changed files that a protection rule covers; committing or reverting
+    /// them clears them.
     violations: Vec<String>,
-    /// Changed files that a protection rule covers and the user accepted.
-    accepted: Vec<String>,
-    approvals: Approvals,
-    /// Approvals are read from the backend once, then owned here.
-    approvals_loaded: bool,
-    /// Hash of each file's patch when it was marked reviewed. A file whose
-    /// patch changes again drops back to unreviewed.
-    reviewed: HashMap<String, u64>,
     tree: FileTree,
     /// Every file in the working tree.
     files: Vec<String>,
@@ -107,6 +103,7 @@ pub struct Workspace {
     expanded_rules: HashSet<String>,
     /// Repositories folded in the Changes tab of a multi-repository workspace.
     collapsed_repos: HashSet<String>,
+    tests: test_panel::Tests,
     diff: Entity<DiffState>,
     /// Panel widths and diff layout, saved for the next session.
     settings: Settings,
@@ -177,10 +174,6 @@ impl Workspace {
             changes: Vec::new(),
             changed_dirs: HashMap::new(),
             violations: Vec::new(),
-            accepted: Vec::new(),
-            approvals: Approvals::default(),
-            approvals_loaded: false,
-            reviewed: HashMap::new(),
             tree: FileTree::default(),
             files: Vec::new(),
             files_hash: 0,
@@ -191,6 +184,7 @@ impl Workspace {
             tab: SidebarTab::Changes,
             collapsed_repos: HashSet::new(),
             expanded_rules: HashSet::new(),
+            tests: test_panel::Tests::default(),
             diff,
             settings,
             dragging: None,
@@ -221,6 +215,7 @@ impl Workspace {
         self.shown.hash(&mut hasher);
         self.changes.is_empty().hash(&mut hasher);
         (self.settings.soft_wrap, self.settings.split).hash(&mut hasher);
+        (self.tests.show_output, self.tests.version).hash(&mut hasher);
         if let Some(preview) = &self.preview {
             preview.path.hash(&mut hasher);
             preview.state.as_ref().map(|state| state.entity_id()).hash(&mut hasher);
@@ -228,10 +223,8 @@ impl Workspace {
         }
         // What the diff header of the shown file says about it.
         if let Some(change) = self.shown.as_ref().and_then(|(path, _)| self.change(path)) {
-            self.is_reviewed(change).hash(&mut hasher);
             self.guard.is_protected(&change.path).hash(&mut hasher);
             self.violations.contains(&change.path).hash(&mut hasher);
-            self.accepted.contains(&change.path).hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -264,17 +257,13 @@ impl Workspace {
     }
 
     fn apply(&mut self, status: Status, cx: &mut Context<Self>) {
-        let Status { changes, files, rules, rules_error, approvals } = status;
+        let Status { changes, files, rules, rules_error } = status;
         match Guard::new(rules) {
             Ok(guard) => self.guard = guard,
             Err(err) => self.error = Some(format!("Invalid rule in .difftower.toml: {err}").into()),
         }
         if let Some(err) = rules_error {
             self.error = Some(format!("Invalid .difftower.toml: {err}").into());
-        }
-        if !self.approvals_loaded {
-            self.approvals = Approvals::parse(&approvals);
-            self.approvals_loaded = true;
         }
 
         self.totals = changes.iter().map(|c| line_counts(&c.patch)).fold((0, 0), |(a, d), (ca, cd)| (a + ca, d + cd));
@@ -292,9 +281,6 @@ impl Workspace {
             for dir in file_tree::ancestors(&change.path) {
                 *self.changed_dirs.entry(dir.to_owned()).or_default() += 1;
             }
-        }
-        if self.approvals.retain_current(&changes) {
-            self.save_approvals(cx);
         }
         self.changes = changes;
         self.show_selected(cx);
@@ -321,40 +307,15 @@ impl Workspace {
     }
 
     fn update_violations(&mut self) {
-        let (accepted, violations): (Vec<&Change>, Vec<&Change>) = self
+        self.violations = self
             .changes
             .iter()
             .filter(|c| {
                 self.guard.is_protected(&c.path)
                     || c.old_path.as_deref().is_some_and(|p| self.guard.is_protected(p))
             })
-            .partition(|c| self.approvals.is_approved(c));
-        self.violations = violations.into_iter().map(|c| c.path.clone()).collect();
-        self.accepted = accepted.into_iter().map(|c| c.path.clone()).collect();
-    }
-
-    /// Accepts the current changes to protected files as intended.
-    fn accept(&mut self, paths: &[String], cx: &mut Context<Self>) {
-        for path in paths {
-            let Some(change) = self.change(path).cloned() else { continue };
-            self.approvals.approve(&change);
-        }
-        self.save_approvals(cx);
-        self.update_violations();
-        cx.notify();
-    }
-
-    fn revoke(&mut self, path: &str, cx: &mut Context<Self>) {
-        if self.approvals.revoke(path) {
-            self.save_approvals(cx);
-        }
-        self.update_violations();
-        cx.notify();
-    }
-
-    fn save_approvals(&self, cx: &mut Context<Self>) {
-        let text = self.approvals.to_text();
-        self.in_background("Could not save approvals", cx, move |backend| backend.save_approvals(&text));
+            .map(|c| c.path.clone())
+            .collect();
     }
 
     /// Runs a backend operation off the UI thread, reporting a failure in
@@ -383,23 +344,8 @@ impl Workspace {
         self.rows = Rc::new(self.tree.rows(&self.expanded));
     }
 
-    fn is_reviewed(&self, change: &Change) -> bool {
-        self.reviewed.get(&change.path) == Some(&hash(&change.patch))
-    }
-
     fn change(&self, path: &str) -> Option<&Change> {
         self.changes.iter().find(|c| c.path == path)
-    }
-
-    fn toggle_reviewed(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(change) = self.change(path) else { return };
-        if self.is_reviewed(change) {
-            self.reviewed.remove(path);
-        } else {
-            let patch_hash = hash(&change.patch);
-            self.reviewed.insert(path.to_owned(), patch_hash);
-        }
-        cx.notify();
     }
 
     fn revert(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
@@ -506,6 +452,7 @@ impl Workspace {
     /// Shows a changed file in the diff, or any other file in a preview.
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(path.to_owned());
+        self.tests.show_output = false;
         if self.change(path).is_some() {
             self.preview = None;
             self._preview_task = None;
@@ -558,6 +505,9 @@ impl Workspace {
 
     fn show_tab(&mut self, tab: SidebarTab, cx: &mut Context<Self>) {
         self.tab = tab;
+        if tab == SidebarTab::Tests {
+            self.ensure_tests_listed(cx);
+        }
         cx.notify();
     }
 
@@ -692,6 +642,25 @@ impl Workspace {
                     .child("vs HEAD"),
             )
             .child(div().flex_1())
+            .child(if self.tests.running() {
+                Button::new("run-tests")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(Lucide::CircleStop).text_color(cx.theme().danger))
+                    .label("Stop tests")
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_tests(cx)))
+            } else {
+                Button::new("run-tests")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(Lucide::Play).text_color(cx.theme().success))
+                    .label("Run tests")
+                    .tooltip("Run every test of every repository")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.run_all_tests(cx);
+                        this.show_tab(SidebarTab::Tests, cx);
+                    }))
+            })
             .child(
                 Button::new("terminal")
                     .small()
@@ -748,6 +717,7 @@ impl Workspace {
 
     /// The bottom bar: protection status at a glance, colored by state.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let test_status = self.render_test_status(cx);
         let theme = cx.theme();
         let rules = self.guard.patterns().len();
         let violated = !self.violations.is_empty();
@@ -755,9 +725,6 @@ impl Workspace {
             let n = self.violations.len();
             let label = format!("{n} protected file{} modified", if n == 1 { "" } else { "s" });
             (Lucide::ShieldAlert, theme.danger, label)
-        } else if !self.accepted.is_empty() {
-            let n = self.accepted.len();
-            (Lucide::ShieldCheck, theme.success, format!("{n} protected change{} accepted", if n == 1 { "" } else { "s" }))
         } else if rules > 0 {
             let label = format!("Protected files intact · {rules} rule{}", if rules == 1 { "" } else { "s" });
             (Lucide::ShieldCheck, theme.success, label)
@@ -788,17 +755,7 @@ impl Workspace {
             )
             .when(violated, |bar| {
                 let paths = self.violations.clone();
-                let accept_paths = paths.clone();
                 bar.child(
-                    Button::new("accept-protected")
-                        .xsmall()
-                        .success()
-                        .icon(IconName::Check)
-                        .label("Accept all")
-                        .tooltip("These changes were intended")
-                        .on_click(cx.listener(move |this, _, _, cx| this.accept(&accept_paths, cx))),
-                )
-                .child(
                     Button::new("revert-protected")
                         .xsmall()
                         .danger()
@@ -807,6 +764,7 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _, window, cx| this.revert(&paths, window, cx))),
                 )
             })
+            .children(test_status)
             .child(div().flex_1())
             .children(self.error.clone().map(|err| div().truncate().text_color(theme.danger).child(err)))
             .when(!self.changes.is_empty(), |bar| {
@@ -846,6 +804,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show_tab(SidebarTab::Changes, cx)))
             .on_action(cx.listener(|this, _: &ShowFiles, _, cx| this.show_tab(SidebarTab::Files, cx)))
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))
+            .on_action(cx.listener(|this, _: &ShowTests, _, cx| this.show_tab(SidebarTab::Tests, cx)))
             .on_action(cx.listener(|this, _: &ToggleWrap, _, cx| this.toggle_wrap(cx)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.drag_divider(event.position.x, window, cx)

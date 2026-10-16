@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use difftower_core::{Backend, Remote, SshTarget};
+use difftower_core::{Backend, Outcome, Remote, Runner, SshTarget, TestEvent, TestTarget};
 
 /// Tests point `HOME` and `DIFFTOWER_SSH` at their own directories.
 static ENV: Mutex<()> = Mutex::new(());
@@ -75,12 +75,10 @@ fn installs_the_agent_and_serves_a_repository() {
     rx.recv_timeout(Duration::from_secs(5)).expect("the agent reports changes");
 
     remote.save_rules(&["tests/**".to_owned()]).unwrap();
-    remote.save_approvals("0000000000000001\ttests/spec.rs\n").unwrap();
     let status = remote.status().unwrap();
     let paths: Vec<_> = status.changes.iter().map(|c| c.path.as_str()).collect();
     assert_eq!(paths, [".difftower.toml", "tests/spec.rs"]);
     assert_eq!(status.rules, ["tests/**"]);
-    assert_eq!(status.approvals, "0000000000000001\ttests/spec.rs\n");
     assert_eq!(remote.read_file("tests/spec.rs").unwrap(), b"// gone\n");
     let spec = status.changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
     assert!(remote.file_diff(spec).unwrap().contains("+// gone"));
@@ -201,4 +199,63 @@ fn reconnects_after_the_connection_drops() {
     fs::write(repo.join("b.rb"), "2\n").unwrap();
     rx.recv_timeout(Duration::from_secs(5)).expect("changes are reported again");
     assert_eq!(remote.status().unwrap().changes.len(), 2);
+}
+
+/// Tests are listed and run on the host, their results streamed back.
+#[test]
+fn lists_and_runs_tests_on_the_host() {
+    let _env = ENV.lock().unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let repo = home.join("repos/api");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    // A stand-in for pytest: it lists two tests and fails one.
+    fs::write(
+        repo.join("fake-pytest"),
+        "case \"$*\" in\n\
+         *--collect-only*) printf 'tests/a.py::test_ok\\ntests/a.py::test_bad\\n\\n2 tests collected\\n' ;;\n\
+         *test_ok*) echo 'tests/a.py::test_ok PASSED' ;;\n\
+         *) printf 'tests/a.py::test_ok PASSED\\ntests/a.py::test_bad FAILED\\n'; exit 1 ;;\n\
+         esac\n",
+    )
+    .unwrap();
+    fs::write(repo.join(".difftower.toml"), "[tests]\nrunner = \"pytest\"\ncommand = \"sh fake-pytest\"\n").unwrap();
+    fs::create_dir_all(home.join("repos/web")).unwrap();
+    git(&home.join("repos/web"), &["init", "-q"]);
+    fake_ssh(tmp.path(), &home);
+
+    let remote = Remote::connect(SshTarget::parse("box:~/repos").unwrap(), agent(), &|_| {}).unwrap();
+    let suites = remote.tests().unwrap();
+    assert_eq!(suites.len(), 1, "{suites:?}");
+    assert_eq!((suites[0].repo.as_str(), suites[0].runner), ("api", Runner::Pytest));
+    let ids: Vec<_> = suites[0].tests.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["api/tests/a.py::test_bad", "api/tests/a.py::test_ok"]);
+    assert_eq!(suites[0].tests[0].file, "api/tests/a.py");
+
+    let run = |target: TestTarget| {
+        let (tx, rx) = mpsc::channel();
+        let handle = remote
+            .run_tests("api", Runner::Pytest, target, Box::new(move |event| { let _ = tx.send(event); }))
+            .unwrap();
+        let mut results = Vec::new();
+        let success = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("the run reports") {
+                TestEvent::Result { id, outcome } => results.push((id, outcome)),
+                TestEvent::Finished { success } => break success,
+                TestEvent::Output { .. } => {}
+            }
+        };
+        drop(handle);
+        (results, success)
+    };
+    let (results, success) = run(TestTarget::All);
+    assert!(!success);
+    assert_eq!(
+        results,
+        [("api/tests/a.py::test_ok".to_owned(), Outcome::Passed), ("api/tests/a.py::test_bad".to_owned(), Outcome::Failed)]
+    );
+    let (results, success) = run(TestTarget::Case { id: "api/tests/a.py::test_ok".into(), line: None });
+    assert!(success);
+    assert_eq!(results, [("api/tests/a.py::test_ok".to_owned(), Outcome::Passed)]);
 }

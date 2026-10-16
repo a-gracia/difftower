@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::{
     Backend, Change, Status,
-    approvals::fnv,
-    backend::dir_name,
+    backend::{OnTestEvent, dir_name},
+    testing::{Runner, TestEvent, TestSuite, TestTarget},
     protocol::{Call, Message, PROTOCOL, Request},
 };
 
@@ -103,6 +103,8 @@ struct Shared {
     link: Mutex<Option<Link>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Result<Value, String>>>>,
     on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// Test runs in progress on the host, by run id.
+    runs: Mutex<HashMap<u64, Arc<dyn Fn(TestEvent) + Send + Sync>>>,
     /// Set when the [`Remote`] is dropped, to stop reconnecting.
     closed: AtomicBool,
 }
@@ -110,6 +112,17 @@ struct Shared {
 impl Shared {
     fn lost(&self) -> String {
         format!("connection to {} lost, reconnecting…", self.target.host)
+    }
+
+    /// Sends `request` without waiting for an answer; false if the
+    /// connection is down.
+    fn send(&self, id: u64, request: Request) -> bool {
+        let Ok(mut line) = serde_json::to_string(&Call { id, request }) else { return false };
+        line.push('\n');
+        match &mut *self.link.lock().unwrap() {
+            Some(link) => link.stdin.write_all(line.as_bytes()).and_then(|()| link.stdin.flush()).is_ok(),
+            None => false,
+        }
     }
 
     fn notify_change(&self) {
@@ -152,6 +165,7 @@ impl Remote {
             link: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             on_change: Mutex::new(None),
+            runs: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
         });
         attach(&shared, started, 1);
@@ -166,14 +180,7 @@ impl Remote {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.shared.pending.lock().unwrap().insert(id, tx);
-
-        let mut line = serde_json::to_string(&Call { id, request })?;
-        line.push('\n');
-        let written = match &mut *self.shared.link.lock().unwrap() {
-            Some(link) => link.stdin.write_all(line.as_bytes()).and_then(|()| link.stdin.flush()).is_ok(),
-            None => false,
-        };
-        if !written {
+        if !self.shared.send(id, request) {
             self.shared.pending.lock().unwrap().remove(&id);
             bail!(self.shared.lost());
         }
@@ -276,6 +283,17 @@ fn read_messages(stdout: impl BufRead, shared: &Shared) {
                 }
             }
             Ok(Message::Changed) => shared.notify_change(),
+            Ok(Message::Test { run, event }) => {
+                let finished = matches!(event, TestEvent::Finished { .. });
+                let on_event = if finished {
+                    shared.runs.lock().unwrap().remove(&run)
+                } else {
+                    shared.runs.lock().unwrap().get(&run).cloned()
+                };
+                if let Some(on_event) = on_event {
+                    on_event(event);
+                }
+            }
             _ => {}
         }
     }
@@ -296,6 +314,12 @@ fn connection_lost(shared: &Arc<Shared>, generation: u64) {
     let reason = shared.lost();
     for (_, tx) in shared.pending.lock().unwrap().drain() {
         let _ = tx.send(Err(reason.clone()));
+    }
+    // The agent's runs died with it.
+    let runs: Vec<_> = shared.runs.lock().unwrap().drain().collect();
+    for (_, on_event) in runs {
+        on_event(TestEvent::Output { line: reason.clone() });
+        on_event(TestEvent::Finished { success: false });
     }
     // Lets the interface refresh, fail, and show that it is reconnecting.
     shared.notify_change();
@@ -325,6 +349,21 @@ fn reconnect(shared: &Arc<Shared>, generation: u64) {
                 return;
             }
             Err(_) => delay = (delay * 2).min(MAX_RECONNECT_DELAY),
+        }
+    }
+}
+
+/// Stops a remote test run when dropped before it finished.
+struct RemoteRun {
+    shared: Arc<Shared>,
+    run: u64,
+}
+
+impl Drop for RemoteRun {
+    fn drop(&mut self) {
+        if self.shared.runs.lock().unwrap().contains_key(&self.run) {
+            // Its reply goes unread; the run still reports that it finished.
+            self.shared.send(0, Request::StopTests { run: self.run });
         }
     }
 }
@@ -376,9 +415,27 @@ impl Backend for Remote {
         self.call(Request::SaveRules { rules: rules.to_vec() })
     }
 
-    fn save_approvals(&self, text: &str) -> Result<()> {
-        self.call(Request::SaveApprovals { text: text.to_owned() })
+    fn tests(&self) -> Result<Vec<TestSuite>> {
+        self.call(Request::Tests)
     }
+
+    fn run_tests(
+        &self,
+        repo: &str,
+        runner: Runner,
+        target: TestTarget,
+        on_event: OnTestEvent,
+    ) -> Result<Box<dyn Any + Send>> {
+        let run = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.shared.runs.lock().unwrap().insert(run, Arc::from(on_event));
+        let started: Result<()> = self.call(Request::RunTests { run, repo: repo.to_owned(), runner, target });
+        if let Err(err) = started {
+            self.shared.runs.lock().unwrap().remove(&run);
+            return Err(err);
+        }
+        Ok(Box::new(RemoteRun { shared: self.shared.clone(), run }))
+    }
+
 
     fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>> {
         *self.shared.on_change.lock().unwrap() = Some(on_change);
@@ -415,6 +472,11 @@ pub(crate) fn shell_quote(path: &str) -> String {
         Some(rest) if rest.starts_with('/') => format!("~/{}", quote(&rest[1..])),
         _ => quote(path),
     }
+}
+
+/// FNV-1a, stable across builds unlike `DefaultHasher`.
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 #[cfg(test)]

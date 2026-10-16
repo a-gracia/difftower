@@ -271,22 +271,6 @@ impl Repo {
         Ok(prefix_rename_lines(&patch, &dir))
     }
 
-    /// Accepted changes to protected files, as stored by [`crate::Approvals::to_text`].
-    pub fn read_approvals(&self) -> Result<String> {
-        match std::fs::read_to_string(self.approvals_path()) {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            result => Ok(result?),
-        }
-    }
-
-    pub fn write_approvals(&self, text: &str) -> Result<()> {
-        Ok(std::fs::write(self.approvals_path(), text)?)
-    }
-
-    fn approvals_path(&self) -> PathBuf {
-        self.git_dir.join("difftower").join("approvals")
-    }
-
     /// Every file in the working tree as of the last snapshot, ignored files
     /// excluded, sorted by path.
     pub fn files(&self) -> Result<Vec<String>> {

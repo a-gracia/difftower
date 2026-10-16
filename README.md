@@ -4,8 +4,8 @@
 monitor for the way code gets written now: an agent edits, you supervise.
 
 It is not an editor. It shows, live, everything your agents changed since
-you started a session, lets you review it file by file, and guards the files
-agents must not touch.
+you started a session, lets you review it file by file, guards the files
+agents must not touch and runs your tests.
 
 ## Features
 
@@ -13,20 +13,36 @@ agents must not touch.
   files included, updated as the agent writes.
 - **Review like a pull request.** The selected file is shown in full with
   its changes, next to a ruler marking where they are. Unified or split
-  view (each side scrolls sideways on its own), syntax highlighting,
-  mark files as reviewed. A reviewed file that changes again goes back to
-  unreviewed.
+  view (each side scrolls sideways on its own) and syntax highlighting.
+  A change is accepted when you commit it.
 - **File tree.** Browse every file in the repository, see which folders
   contain changes, and open unchanged files read-only.
 - **Protected files and folders.** Protect tests, migrations or whole
   folders from the tree. The status bar turns red the moment an agent
   touches one, with a single count however many files it hit, and the
   Protected tab lists each rule with what changed under it. Revert one
-  file, one rule or everything in a click — or accept the change when it
-  was intended. An acceptance covers that exact change: if the agent edits
-  the file again, the alert comes back.
+  file, one rule or everything in a click; the alert stays until the
+  change is reverted or committed.
 - **Revert any file** to HEAD.
 - **Integrated terminal** to run your agent right next to its diff.
+- **Tests.** The Tests tab lists every test of every repository, by folder
+  and file, and runs them all, a folder, a file or a single test. The
+  runner's output shows in the center panel, and the status bar turns red
+  when a test fails.
+
+### Tests
+
+Difftower runs pytest, vitest and Rails (minitest) tests, found from the
+project's files, with the command a terminal at the repository root would
+use (`.venv/bin/python -m pytest`, `node_modules/.bin/vitest`,
+`bin/rails test`). To choose the runner or its command, add to
+`.difftower.toml`:
+
+```toml
+[tests]
+runner = "rails"   # pytest, vitest or rails
+command = "PARALLEL_WORKERS=2 nice -n 19 bin/rails test"
+```
 
 ### Protected files
 
@@ -67,6 +83,7 @@ terminal keep their width and the diff takes the rest.
 | `Ctrl+1` | Changes |
 | `Ctrl+2` | Files |
 | `Ctrl+3` | Protected |
+| `Ctrl+4` | Tests |
 | `Alt+Z` | Wrap long lines |
 
 ## Several repositories at once
@@ -75,8 +92,10 @@ Open a directory that is not a repository but holds some, such as
 `~/repos` with `api/`, `web/` and `worker/` inside, and Difftower shows
 all of them in one workspace, every path under its repository's name. No
 `git init` in the parent is needed. Each repository keeps its own
-`.difftower.toml` and approvals, so its protections also apply when it is
-opened alone. Repositories are found one level down.
+`.difftower.toml`, so its protections and tests also apply when it is
+opened alone. Repositories are found one level down. The parent may be a
+repository too, as when it keeps notes beside code repositories it
+ignores: it shows alongside them.
 
 ## Remote repositories over SSH
 
@@ -136,7 +155,8 @@ at the top left of a workspace goes back to it.
 
 ## Roadmap
 
-- [x] Live diff against HEAD, review state, protected files
+- [x] Live diff against HEAD, protected files
+- [x] Run tests by repository, folder, file or one at a time
 - [x] Integrated terminal to run agents side by side
 - [ ] Line comments sent back to the agent as prompts
 - [ ] Agent hooks that block edits to protected files before they happen

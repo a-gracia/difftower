@@ -4,6 +4,8 @@
 //! through SSH; it exits when the connection closes.
 
 use std::{
+    any::Any,
+    collections::HashMap,
     io::{BufRead, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -27,8 +29,8 @@ fn main() {
         }
     };
     let out = Arc::new(Mutex::new(std::io::stdout()));
-    let backend = match open_path(&path) {
-        Ok(backend) => backend,
+    let backend: Arc<dyn Backend> = match open_path(&path) {
+        Ok(backend) => backend.into(),
         Err(err) => {
             send(&out, &Message::Fatal { error: format!("{err:#}") });
             std::process::exit(1);
@@ -39,6 +41,8 @@ fn main() {
     let changed_out = out.clone();
     let _watch = backend.watch(Box::new(move || send(&changed_out, &Message::Changed)));
 
+    // Test runs in progress; dropping one stops it.
+    let runs: Arc<Mutex<HashMap<u64, Box<dyn Any + Send>>>> = Arc::default();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let call: Call = match serde_json::from_str(&line) {
@@ -48,8 +52,45 @@ fn main() {
                 continue;
             }
         };
-        let result = handle(&*backend, call.request).map_err(|err| format!("{err:#}"));
-        send(&out, &Message::Reply { id: call.id, result });
+        let id = call.id;
+        match call.request {
+            // Listing tests takes seconds; other requests go on meanwhile.
+            Request::Tests => {
+                let (backend, out) = (backend.clone(), out.clone());
+                std::thread::spawn(move || {
+                    let result = backend.tests().map_err(|err| format!("{err:#}"));
+                    let result = result.and_then(|suites| serde_json::to_value(suites).map_err(|err| err.to_string()));
+                    send(&out, &Message::Reply { id, result });
+                });
+            }
+            Request::RunTests { run, repo, runner, target } => {
+                let (events_out, finished_runs) = (out.clone(), runs.clone());
+                let on_event = Box::new(move |event: difftower_core::TestEvent| {
+                    let finished = matches!(event, difftower_core::TestEvent::Finished { .. });
+                    send(&events_out, &Message::Test { run, event });
+                    if finished {
+                        finished_runs.lock().unwrap().remove(&run);
+                    }
+                });
+                let result = match backend.run_tests(&repo, runner, target, on_event) {
+                    Ok(handle) => {
+                        runs.lock().unwrap().insert(run, handle);
+                        Ok(Value::Null)
+                    }
+                    Err(err) => Err(format!("{err:#}")),
+                };
+                send(&out, &Message::Reply { id, result });
+            }
+            Request::StopTests { run } => {
+                let handle = runs.lock().unwrap().remove(&run);
+                drop(handle);
+                send(&out, &Message::Reply { id, result: Ok(Value::Null) });
+            }
+            request => {
+                let result = handle(&*backend, request).map_err(|err| format!("{err:#}"));
+                send(&out, &Message::Reply { id, result });
+            }
+        }
     }
 }
 
@@ -66,7 +107,7 @@ fn handle(backend: &dyn Backend, request: Request) -> Result<Value> {
         }
         Request::FileDiff { change } => Value::String(backend.file_diff(&change)?),
         Request::SaveRules { rules } => to_null(backend.save_rules(&rules)?),
-        Request::SaveApprovals { text } => to_null(backend.save_approvals(&text)?),
+        Request::Tests | Request::RunTests { .. } | Request::StopTests { .. } => unreachable!("handled in main"),
     })
 }
 

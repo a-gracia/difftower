@@ -3,10 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Change;
+use crate::{Change, Runner, TestEvent, TestTarget};
 
 /// Bumped whenever a message changes shape.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Call {
@@ -24,7 +24,12 @@ pub enum Request {
     /// Answered with the patch as a string.
     FileDiff { change: Change },
     SaveRules { rules: Vec<String> },
-    SaveApprovals { text: String },
+    /// Answered with every [`crate::TestSuite`].
+    Tests,
+    /// Answered at once; the run reports with [`Message::Test`] under `run`.
+    RunTests { run: u64, repo: String, runner: Runner, target: TestTarget },
+    /// Answered at once; the run still reports that it finished.
+    StopTests { run: u64 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,4 +48,6 @@ pub enum Message {
     /// The working tree or HEAD changed.
     Changed,
     Reply { id: u64, result: Result<serde_json::Value, String> },
+    /// Progress of the test run started as `run`.
+    Test { run: u64, event: TestEvent },
 }

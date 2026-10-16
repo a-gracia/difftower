@@ -1,6 +1,6 @@
 use std::{fs, path::Path, process::Command};
 
-use difftower_core::{Approvals, ChangeStatus, Guard, Repo, dir_rule, file_rule, load_rules, save_rules};
+use difftower_core::{ChangeStatus, Guard, Repo, dir_rule, file_rule, load_rules, save_rules};
 
 fn git(dir: &Path, args: &[&str]) {
     let ok = Command::new("git").current_dir(dir).args(args).status().unwrap().success();
@@ -178,28 +178,6 @@ fn lists_files_without_ignored_ones() {
     fs::write(dir.path().join("new.txt"), "x").unwrap();
     repo.snapshot().unwrap();
     assert_eq!(repo.files().unwrap(), [".gitignore", "a.txt", "b.txt", "new.txt", "tests/spec.rs"]);
-}
-
-#[test]
-fn approvals_cover_one_exact_patch_and_persist() {
-    let (dir, repo) = fixture();
-    let head = repo.head_tree().unwrap();
-    fs::write(dir.path().join("tests/spec.rs"), "assert!(false);\n").unwrap();
-    let change = repo.changes(&head).unwrap().files.into_iter().find(|c| c.path == "tests/spec.rs").unwrap();
-
-    let mut approvals = Approvals::default();
-    approvals.approve(&change);
-    repo.write_approvals(&approvals.to_text()).unwrap();
-    let mut approvals = Approvals::parse(&repo.read_approvals().unwrap());
-    assert!(approvals.is_approved(&change));
-
-    // A further edit by the agent is not covered by the earlier approval.
-    fs::write(dir.path().join("tests/spec.rs"), "assert!(1 == 2);\n").unwrap();
-    let changes = repo.changes(&head).unwrap().files;
-    let edited = changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
-    assert!(!approvals.is_approved(edited));
-    assert!(approvals.retain_current(&changes));
-    assert!(!approvals.is_approved(&change));
 }
 
 #[test]

@@ -331,7 +331,7 @@ impl Render for TerminalView {
 
 /// The system's monospace font. GPUI does not resolve fontconfig aliases,
 /// so ask fontconfig for the concrete family once.
-fn monospace_family() -> SharedString {
+pub(crate) fn monospace_family() -> SharedString {
     static FAMILY: OnceLock<SharedString> = OnceLock::new();
     FAMILY
         .get_or_init(|| {

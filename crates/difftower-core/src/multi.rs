@@ -1,7 +1,7 @@
 //! Several repositories shown as one: the repositories side by side in a
 //! directory, and the directory itself when it is a repository too. Every
 //! path gets its repository's directory name as a prefix (none for the outer
-//! repository); each repository keeps its own rules and approvals.
+//! repository); each repository keeps its own rules.
 
 use std::{
     any::Any,
@@ -12,8 +12,9 @@ use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::{
     Backend, Change, Repo, Status,
-    backend::{dir_name, repo_status},
+    backend::{OnTestEvent, dir_name, join, repo_status, repo_tests, run_repo_tests},
     guard,
+    testing::{Runner, TestSuite, TestTarget},
 };
 
 pub struct Multi {
@@ -78,11 +79,6 @@ impl Multi {
     }
 }
 
-/// `path` under the directory `name`, or as is for the outer repository.
-fn join(name: &str, path: &str) -> String {
-    if name.is_empty() { path.to_owned() } else { format!("{name}/{path}") }
-}
-
 impl Backend for Multi {
     fn name(&self) -> String {
         dir_name(&self.root())
@@ -114,7 +110,6 @@ impl Backend for Multi {
             files: Vec::new(),
             rules: Vec::new(),
             rules_error: None,
-            approvals: String::new(),
         };
         let mut errors = Vec::new();
         for ((name, _), repo_status) in self.repos.iter().zip(statuses) {
@@ -131,11 +126,6 @@ impl Backend for Multi {
             }));
             if let Some(err) = repo_status.rules_error {
                 errors.push(format!("{name}: {err}"));
-            }
-            for line in repo_status.approvals.lines() {
-                if let Some((hash, path)) = line.split_once('\t') {
-                    status.approvals.push_str(&format!("{hash}\t{}\n", join(name, path)));
-                }
             }
         }
         if !errors.is_empty() {
@@ -196,19 +186,24 @@ impl Backend for Multi {
         Ok(())
     }
 
-    fn save_approvals(&self, text: &str) -> Result<()> {
-        let mut by_repo = vec![String::new(); self.repos.len()];
-        for line in text.lines() {
-            let Some((hash, path)) = line.split_once('\t') else { continue };
-            let (ix, (_, path)) = self.locate_ix(path)?;
-            by_repo[ix].push_str(&format!("{hash}\t{path}\n"));
-        }
-        for ((_, repo), text) in self.repos.iter().zip(by_repo) {
-            if repo.read_approvals()? != text {
-                repo.write_approvals(&text)?;
-            }
-        }
-        Ok(())
+    fn tests(&self) -> Result<Vec<TestSuite>> {
+        Ok(std::thread::scope(|scope| {
+            let handles: Vec<_> =
+                self.repos.iter().map(|(name, repo)| scope.spawn(move || repo_tests(repo.root(), name))).collect();
+            handles.into_iter().flat_map(|h| h.join().expect("test listing panicked")).collect()
+        }))
+    }
+
+    fn run_tests(
+        &self,
+        repo: &str,
+        runner: Runner,
+        target: TestTarget,
+        on_event: OnTestEvent,
+    ) -> Result<Box<dyn Any + Send>> {
+        let (name, found) =
+            self.repos.iter().find(|(name, _)| name == repo).ok_or_else(|| anyhow!("no repository {repo}"))?;
+        run_repo_tests(found.root(), name, runner, target, on_event)
     }
 
     fn watch(&self, on_change: Box<dyn Fn() + Send + Sync>) -> Result<Box<dyn Any + Send>> {

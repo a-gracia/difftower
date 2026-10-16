@@ -26,6 +26,7 @@ impl Workspace {
             SidebarTab::Changes => self.render_changes(cx).into_any_element(),
             SidebarTab::Files => self.render_files(cx).into_any_element(),
             SidebarTab::Protected => self.render_protected(cx).into_any_element(),
+            SidebarTab::Tests => self.render_tests(cx).into_any_element(),
         };
         let theme = cx.theme();
         v_flex()
@@ -42,7 +43,8 @@ impl Workspace {
                     .border_color(theme.border)
                     .child(self.tab_button(SidebarTab::Changes, format!("Changes {}", self.changes.len()), cx))
                     .child(self.tab_button(SidebarTab::Files, "Files".into(), cx))
-                    .child(self.tab_button(SidebarTab::Protected, "Protected".into(), cx)),
+                    .child(self.tab_button(SidebarTab::Protected, "Protected".into(), cx))
+                    .child(self.tab_button(SidebarTab::Tests, "Tests".into(), cx)),
             )
             .child(div().flex_1().min_h_0().child(content))
     }
@@ -52,6 +54,7 @@ impl Workspace {
             SidebarTab::Changes => "tab-changes",
             SidebarTab::Files => "tab-files",
             SidebarTab::Protected => "tab-protected",
+            SidebarTab::Tests => "tab-tests",
         };
         Button::new(id)
             .xsmall()
@@ -61,14 +64,13 @@ impl Workspace {
             .when(tab == SidebarTab::Protected && !self.violations.is_empty(), |b| {
                 b.icon(Icon::new(Lucide::ShieldAlert).text_color(cx.theme().danger))
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.tab = tab;
-                cx.notify();
-            }))
+            .when(tab == SidebarTab::Tests && self.tests.failed() > 0, |b| {
+                b.icon(Icon::new(Lucide::CircleX).text_color(cx.theme().danger))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
     }
 
     fn render_changes(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let reviewed = self.changes.iter().filter(|c| self.is_reviewed(c)).count();
         let mut items: Vec<AnyElement> = Vec::new();
         let repos = self.backend.repos();
         if repos.len() > 1 {
@@ -93,23 +95,12 @@ impl Workspace {
             items.extend((0..self.changes.len()).map(|ix| self.render_change(ix, "", cx)));
         }
 
-        v_flex()
-            .size_full()
-            .child(
-                h_flex()
-                    .h(ROW_HEIGHT)
-                    .px_3()
-                    .text_size(DETAIL_SIZE)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("{reviewed}/{} reviewed", self.changes.len())),
-            )
-            .child(v_flex().id("changes").flex_1().overflow_y_scroll().children(items))
+        v_flex().id("changes").size_full().py_1().overflow_y_scroll().children(items)
     }
 
     fn render_repo_header(&self, repo: &str, range: Range<usize>, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let changes = &self.changes[range.clone()];
-        let reviewed = changes.iter().filter(|c| self.is_reviewed(c)).count();
         let violated = changes.iter().any(|c| self.violations.contains(&c.path));
         let collapsed = self.collapsed_repos.contains(repo);
         let toggle = repo.to_owned();
@@ -138,7 +129,7 @@ impl Workspace {
                 div()
                     .text_size(DETAIL_SIZE)
                     .text_color(theme.muted_foreground)
-                    .child(format!("{reviewed}/{}", changes.len())),
+                    .child(changes.len().to_string()),
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 if !this.collapsed_repos.remove(&toggle) {
@@ -160,7 +151,6 @@ impl Workspace {
             None => (String::new(), relative.to_owned()),
         };
         let (letter, color) = status_style(change.status, cx);
-        let is_reviewed = self.is_reviewed(change);
         let selected = self.selected.as_deref() == Some(&path);
         h_flex()
             .id(("change", ix))
@@ -172,7 +162,6 @@ impl Workspace {
             .cursor_pointer()
             .when(selected, |el| el.bg(theme.list_active))
             .hover(|el| el.bg(theme.list_hover))
-            .when(is_reviewed, |el| el.opacity(0.5))
             .child(file_icons::icon(&file))
             .child(
                 h_flex()
@@ -186,7 +175,6 @@ impl Workspace {
             .when(self.violations.contains(&path), |el| {
                 el.child(Icon::new(Lucide::ShieldAlert).small().text_color(theme.danger))
             })
-            .when(is_reviewed, |el| el.child(Icon::new(IconName::Check).small().text_color(theme.success)))
             .child(div().w_3().flex_none().text_size(DETAIL_SIZE).font_semibold().text_color(color).child(letter))
             .on_click(cx.listener(move |this, _, window, cx| this.open(&path, window, cx)))
             .into_any_element()
@@ -360,20 +348,16 @@ impl Workspace {
         let covered: Vec<&String> = self.covered.get(ix).map(|files| files.iter().collect()).unwrap_or_default();
         let modified: Vec<String> =
             self.violations.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
-        let accepted: Vec<String> =
-            self.accepted.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
         let ok = modified.is_empty();
         let expanded = self.expanded_rules.contains(&pattern);
         let files_label = format!("{} file{}", covered.len(), if covered.len() == 1 { "" } else { "s" });
         let (status, status_color) = if !ok {
             (format!("{} modified", modified.len()), theme.danger)
-        } else if !accepted.is_empty() {
-            (format!("{} accepted", accepted.len()), theme.success)
         } else {
             (files_label.clone(), theme.muted_foreground)
         };
         let toggle = pattern.clone();
-        let (accept_rule, revert_rule) = (modified.clone(), modified.clone());
+        let revert_rule = modified.clone();
 
         let header = h_flex()
             .id(("rule", ix))
@@ -404,19 +388,17 @@ impl Workspace {
                 cx.notify();
             }));
 
-        // Modified and accepted files always show; the rest when expanded.
+        // Modified files always show; the rest when expanded.
         let listed: Vec<&String> = if expanded {
             covered.iter().copied().take(LISTED).collect()
         } else {
-            covered.iter().copied().filter(|f| modified.contains(f) || accepted.contains(f)).collect()
+            covered.iter().copied().filter(|f| modified.contains(f)).collect()
         };
         let rows = listed.into_iter().enumerate().map(|(file_ix, path)| {
             let id = ix * 100_000 + file_ix;
             let is_modified = modified.contains(path);
-            let is_accepted = accepted.contains(path);
             let name = path.rsplit('/').next().unwrap_or(path);
-            let (open_path, accept_path, revert_path, revoke_path, unprotect_path) =
-                (path.clone(), path.clone(), path.clone(), path.clone(), path.clone());
+            let (open_path, revert_path, unprotect_path) = (path.clone(), path.clone(), path.clone());
             h_flex()
                 .h(ROW_HEIGHT)
                 .pl(px(8. + 3. * INDENT))
@@ -439,16 +421,6 @@ impl Workspace {
                 )
                 .when(is_modified, |el| {
                     el.child(
-                        Button::new(("accept-file", id))
-                            .xsmall()
-                            .ghost()
-                            .icon(Icon::new(IconName::Check).text_color(theme.success))
-                            .tooltip("Accept this change")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.accept(std::slice::from_ref(&accept_path), cx)
-                            })),
-                    )
-                    .child(
                         Button::new(("revert-file", id))
                             .xsmall()
                             .ghost()
@@ -457,16 +429,6 @@ impl Workspace {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.revert(std::slice::from_ref(&revert_path), window, cx)
                             })),
-                    )
-                })
-                .when(is_accepted, |el| {
-                    el.child(Icon::new(IconName::Check).small().text_color(theme.success)).child(
-                        Button::new(("revoke", id))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Undo2)
-                            .tooltip("Undo acceptance")
-                            .on_click(cx.listener(move |this, _, _, cx| this.revoke(&revoke_path, cx))),
                     )
                 })
                 .child(
@@ -503,14 +465,6 @@ impl Workspace {
                         .pl(px(8. + 3. * INDENT))
                         .py_1()
                         .gap_1()
-                        .child(
-                            Button::new(("accept-rule", ix))
-                                .xsmall()
-                                .success()
-                                .icon(IconName::Check)
-                                .label("Accept")
-                                .on_click(cx.listener(move |this, _, _, cx| this.accept(&accept_rule, cx))),
-                        )
                         .child(
                             Button::new(("revert-rule", ix))
                                 .xsmall()

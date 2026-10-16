@@ -70,7 +70,7 @@ fn shows_every_repository_under_its_name() {
 }
 
 #[test]
-fn keeps_rules_and_approvals_in_each_repository() {
+fn keeps_rules_in_each_repository() {
     let root = fixture();
     let backend = open_path(root.path()).unwrap();
 
@@ -89,10 +89,6 @@ fn keeps_rules_and_approvals_in_each_repository() {
     let api_config = fs::read_to_string(root.path().join("api/.difftower.toml")).unwrap();
     assert!(api_config.contains("\"!src/main.rs\""), "{api_config}");
     assert_eq!(backend.status().unwrap().rules, ["api/src/**", "!api/src/main.rs"]);
-
-    backend.save_approvals("00000000000000aa\tweb/index.html\n").unwrap();
-    assert_eq!(backend.status().unwrap().approvals, "00000000000000aa\tweb/index.html\n");
-    assert!(!root.path().join("api/.git/difftower/approvals").exists());
 }
 
 #[test]
@@ -160,13 +156,6 @@ fn a_repository_holding_repositories_keeps_rules_in_each() {
     let mut rules = backend.status().unwrap().rules;
     rules.sort();
     assert_eq!(rules, ["!api/src/main.rs", "api/src/**", "library/**"]);
-
-    backend.save_approvals("00000000000000aa\tAGENTS.md\n00000000000000bb\tweb/index.html\n").unwrap();
-    assert_eq!(fs::read_to_string(root.path().join(".git/difftower/approvals")).unwrap(), "00000000000000aa\tAGENTS.md\n");
-    assert_eq!(
-        fs::read_to_string(root.path().join("web/.git/difftower/approvals")).unwrap(),
-        "00000000000000bb\tindex.html\n"
-    );
 }
 
 #[test]
