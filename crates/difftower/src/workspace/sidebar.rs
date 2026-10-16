@@ -128,6 +128,9 @@ impl Workspace {
         let toggle = repo.to_owned();
         h_flex()
             .id(SharedString::from(format!("repo-{repo}")))
+            // A virtual list sizes rows to their content otherwise, pushing
+            // the status letter out of the panel.
+            .w_full()
             .h(ROW_HEIGHT)
             .pl_1()
             .pr_3()
@@ -178,6 +181,9 @@ impl Workspace {
         let selected = self.selected.as_deref() == Some(&path);
         h_flex()
             .id(("change", ix))
+            // A virtual list sizes rows to their content otherwise, pushing
+            // the status letter out of the panel.
+            .w_full()
             .h(ROW_HEIGHT)
             .pl(px(if grouped { 8. + 2. * INDENT + 4. } else { 8. }))
             .pr_3()
