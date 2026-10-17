@@ -63,7 +63,7 @@ fn shows_every_repository_under_its_name() {
     let full = backend.file_diff(&status.changes[1]).unwrap();
     assert!(full.starts_with("diff --git a/api/src/main.rs b/api/src/main.rs"), "{full}");
     for change in &status.changes {
-        backend.revert(change).unwrap();
+        backend.revert(std::slice::from_ref(change), false).unwrap();
     }
     assert!(backend.status().unwrap().changes.is_empty());
     assert!(root.path().join("api/old.rs").exists());
@@ -138,7 +138,7 @@ fn a_repository_holding_repositories_shows_them_all() {
     assert!(full.starts_with("diff --git a/web/index.html b/web/index.html"), "{full}");
 
     for change in &status.changes {
-        backend.revert(change).unwrap();
+        backend.revert(std::slice::from_ref(change), false).unwrap();
     }
     assert!(backend.status().unwrap().changes.is_empty());
 }

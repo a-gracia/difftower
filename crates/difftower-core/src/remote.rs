@@ -398,8 +398,24 @@ impl Backend for Remote {
         self.call(Request::Status)
     }
 
-    fn revert(&self, change: &Change) -> Result<()> {
-        self.call(Request::Revert { change: change.clone() })
+    fn revert(&self, changes: &[Change], end_session: bool) -> Result<()> {
+        self.call(Request::Revert { changes: changes.to_vec(), end_session })
+    }
+
+    fn undo(&self) -> Result<()> {
+        self.call(Request::Undo)
+    }
+
+    fn start_session(&self) -> Result<()> {
+        self.call(Request::StartSession)
+    }
+
+    fn end_session(&self) -> Result<()> {
+        self.call(Request::EndSession)
+    }
+
+    fn accept(&self, paths: &[String]) -> Result<()> {
+        self.call(Request::Accept { paths: paths.to_vec() })
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {

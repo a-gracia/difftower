@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Change, Repo, guard,
+    Change, Repo, Session, guard,
     multi::Multi,
     testing::{self, Runner, TestEvent, TestSuite, TestTarget},
 };
@@ -15,7 +15,8 @@ pub type OnTestEvent = Box<dyn Fn(TestEvent) + Send + Sync>;
 /// Everything the UI shows about a repository at one moment.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
-    /// Everything that differs from HEAD.
+    /// Everything that differs from the base: the session's start while
+    /// one is running, HEAD otherwise.
     pub changes: Vec<Change>,
     /// Every file in the working tree, ignored files excluded.
     pub files: Vec<String>,
@@ -23,6 +24,10 @@ pub struct Status {
     pub rules: Vec<String>,
     /// Why the rules could not be read, if they could not.
     pub rules_error: Option<String>,
+    /// The running session, if any.
+    pub session: Option<Session>,
+    /// Whether the last revert can be undone.
+    pub can_undo: bool,
 }
 
 /// A repository, on this machine or on a remote host.
@@ -38,11 +43,20 @@ pub trait Backend: Send + Sync {
     /// start with their repository's directory.
     fn repos(&self) -> Vec<String>;
     fn status(&self) -> Result<Status>;
-    /// Restores one changed file to its state in HEAD.
-    fn revert(&self, change: &Change) -> Result<()>;
+    /// Restores changed files to their state in the base, so that
+    /// [`Self::undo`] can put them back; `end_session` ends the session too.
+    fn revert(&self, changes: &[Change], end_session: bool) -> Result<()>;
+    /// Puts back what the last revert replaced.
+    fn undo(&self) -> Result<()>;
     fn read_file(&self, path: &str) -> Result<Vec<u8>>;
     /// One changed file's patch with the whole file as context.
     fn file_diff(&self, change: &Change) -> Result<String>;
+    /// Starts a session in every repository, from what is there now.
+    fn start_session(&self) -> Result<()>;
+    /// Ends the session: what changed in it is accepted.
+    fn end_session(&self) -> Result<()>;
+    /// Accepts the changes to `paths` into the session.
+    fn accept(&self, paths: &[String]) -> Result<()>;
     fn save_rules(&self, rules: &[String]) -> Result<()>;
     /// The tests of every repository, one suite per runner. Slow: runners
     /// start to list them.
@@ -119,8 +133,24 @@ impl Backend for Local {
         repo_status(&self.repo, "")
     }
 
-    fn revert(&self, change: &Change) -> Result<()> {
-        self.repo.revert(&self.repo.head_tree()?, change)
+    fn revert(&self, changes: &[Change], end_session: bool) -> Result<()> {
+        self.repo.revert_all(changes, end_session)
+    }
+
+    fn undo(&self) -> Result<()> {
+        self.repo.undo()
+    }
+
+    fn start_session(&self) -> Result<()> {
+        self.repo.start_session()
+    }
+
+    fn end_session(&self) -> Result<()> {
+        self.repo.end_session()
+    }
+
+    fn accept(&self, paths: &[String]) -> Result<()> {
+        self.repo.accept(paths)
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {
@@ -128,7 +158,7 @@ impl Backend for Local {
     }
 
     fn file_diff(&self, change: &Change) -> Result<String> {
-        self.repo.file_patch(&self.repo.head_tree()?, change, "")
+        self.repo.file_patch(&self.repo.base_tree()?, change, "")
     }
 
     fn save_rules(&self, rules: &[String]) -> Result<()> {
@@ -227,14 +257,16 @@ pub(crate) fn join(name: &str, path: &str) -> String {
 
 /// The status of one repository, its paths placed under `prefix`.
 pub(crate) fn repo_status(repo: &Repo, prefix: &str) -> Result<Status> {
-    let base = repo.head_tree()?;
+    let session = repo.session(prefix);
+    let can_undo = repo.can_undo();
+    let base = repo.base_tree()?;
     let changes = repo.changes_under(&base, prefix)?.files;
     let files = repo.files()?;
     let (rules, rules_error) = match guard::load_rules(repo.root()) {
         Ok(rules) => (rules, None),
         Err(err) => (Vec::new(), Some(err.to_string())),
     };
-    Ok(Status { changes, files, rules, rules_error })
+    Ok(Status { changes, files, rules, rules_error, session, can_undo })
 }
 
 pub(crate) fn dir_name(path: &str) -> String {

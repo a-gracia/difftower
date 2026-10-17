@@ -37,6 +37,41 @@ pub struct Change {
     pub patch: String,
 }
 
+/// A session: started by the user, it compares against HEAD as it was then,
+/// however many commits are made since, so an agent committing does not
+/// hide what it changed. What was uncommitted when it started stays shown.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Session {
+    /// Unix time the session started.
+    pub started: i64,
+    /// Each repository's session commit, short: what its changes are
+    /// against, accepted changes included.
+    pub commits: Vec<SessionCommit>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCommit {
+    /// The repository's directory, as in [`crate::Backend::repos`].
+    pub repo: String,
+    pub hash: String,
+}
+
+/// Where the session lives: a commit whose tree is HEAD's when the session
+/// started, with accepted files taken in. Being a ref keeps it through
+/// restarts and
+/// `git gc`; nothing else points to it.
+const SESSION_REF: &str = "refs/difftower/session";
+/// What the last revert replaced, so it can be undone.
+const UNDO_REF: &str = "refs/difftower/undo";
+
+/// What an undo puts back, kept as the undo commit's message.
+#[derive(Default, Serialize, Deserialize)]
+struct UndoRecord {
+    paths: Vec<String>,
+    /// The session the revert ended, to resume it.
+    session: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Changes {
     pub files: Vec<Change>,
@@ -206,6 +241,141 @@ impl Repo {
         Ok(TreeId(id.trim_end().to_owned()))
     }
 
+    /// The tree changes are against: the session's start while one is
+    /// running, the last commit otherwise.
+    pub fn base_tree(&self) -> Result<TreeId> {
+        match self.session_tree() {
+            Some(tree) => Ok(tree),
+            None => self.head_tree(),
+        }
+    }
+
+    /// The working tree when the session started, if one is running.
+    pub fn session_tree(&self) -> Option<TreeId> {
+        let id = self.git(&["rev-parse", "--verify", "--quiet", &format!("{SESSION_REF}^{{tree}}")]).ok()?;
+        Some(TreeId(id.trim_end().to_owned()))
+    }
+
+    /// The running session, if any, with `repo` naming this repository.
+    pub fn session(&self, repo: &str) -> Option<Session> {
+        let line = self.git(&["log", "-1", "--format=%at %h", SESSION_REF]).ok()?;
+        let (started, hash) = line.trim_end().split_once(' ')?;
+        Some(Session {
+            started: started.parse().unwrap_or(0),
+            commits: vec![SessionCommit { repo: repo.to_owned(), hash: hash.to_owned() }],
+        })
+    }
+
+    /// Starts a session from HEAD now, replacing any running: what is
+    /// uncommitted stays shown, and commits from here on hide nothing.
+    pub fn start_session(&self) -> Result<()> {
+        let tree = self.head_tree()?;
+        self.set_session(&tree, None)
+    }
+
+    /// Ends the session: what changed in it is accepted.
+    pub fn end_session(&self) -> Result<()> {
+        if self.session_tree().is_some() {
+            self.git(&["update-ref", "-d", SESSION_REF])?;
+        }
+        Ok(())
+    }
+
+    /// Takes the working tree's version of `paths` into the session, so
+    /// their changes are accepted while the rest stay in view.
+    pub fn accept(&self, paths: &[String]) -> Result<()> {
+        let base = self.session_tree().context("no session is running")?;
+        let current = self.snapshot()?;
+        let index = self.git_dir.join("difftower").join("session-index");
+        let git = |args: &[&str]| git_output(&self.root, args, Some(&index), None);
+        git(&["read-tree", &base.0])?;
+        for path in paths {
+            let entry = git(&["ls-tree", "-z", &current.0, "--", path])?;
+            match entry.trim_end_matches('\0').split_once('\t') {
+                Some((meta, _)) => {
+                    let mut meta = meta.split(' ');
+                    let (mode, hash) = (meta.next().unwrap_or_default(), meta.nth(1).unwrap_or_default());
+                    git(&["update-index", "--add", "--cacheinfo", &format!("{mode},{hash},{path}")])?;
+                }
+                None => {
+                    git(&["update-index", "--force-remove", "--", path])?;
+                }
+            }
+        }
+        let tree = TreeId(git(&["write-tree"])?.trim_end().to_owned());
+        let _ = std::fs::remove_file(&index);
+        // Accepting keeps the session's start time.
+        let started = self.git(&["log", "-1", "--format=%ad", "--date=raw", SESSION_REF])?;
+        self.set_session(&tree, Some(started.trim_end()))
+    }
+
+    /// Records `tree` as the session's, dated `date` (git's raw format) or now.
+    fn set_session(&self, tree: &TreeId, date: Option<&str>) -> Result<()> {
+        let commit = self.commit_tree(tree, "Difftower session", date)?;
+        self.git(&["update-ref", SESSION_REF, &commit])?;
+        Ok(())
+    }
+
+    /// A commit of `tree` that belongs to no branch.
+    fn commit_tree(&self, tree: &TreeId, message: &str, date: Option<&str>) -> Result<String> {
+        let args = [
+            "-c", "user.name=Difftower", "-c", "user.email=difftower@localhost", "commit-tree", &tree.0, "-m", message,
+        ];
+        let date = date.unwrap_or_default();
+        let env: &[(&str, &str)] =
+            if date.is_empty() { &[] } else { &[("GIT_AUTHOR_DATE", date), ("GIT_COMMITTER_DATE", date)] };
+        Ok(git_output_env(&self.root, &args, env)?.trim_end().to_owned())
+    }
+
+    /// Restores `changes` to their state in the base, first keeping what
+    /// they were so [`Self::undo`] can put it back. With `end_session`, the
+    /// session ends too, and an undo resumes it.
+    pub fn revert_all(&self, changes: &[Change], end_session: bool) -> Result<()> {
+        let base = self.base_tree()?;
+        let before = self.snapshot()?;
+        let session = if end_session {
+            self.git(&["rev-parse", "--verify", "--quiet", SESSION_REF]).ok().map(|id| id.trim_end().to_owned())
+        } else {
+            None
+        };
+        let paths = changes.iter().flat_map(|c| c.old_path.iter().chain([&c.path]).cloned()).collect();
+        let record = serde_json::to_string(&UndoRecord { paths, session })?;
+        let undo = self.commit_tree(&before, &record, None)?;
+        self.git(&["update-ref", UNDO_REF, &undo])?;
+        for change in changes {
+            self.revert(&base, change)?;
+        }
+        if end_session {
+            self.end_session()?;
+        }
+        Ok(())
+    }
+
+    /// Whether a revert can be undone.
+    pub fn can_undo(&self) -> bool {
+        self.git(&["rev-parse", "--verify", "--quiet", UNDO_REF]).is_ok()
+    }
+
+    /// Puts back what the last revert replaced, and the session it ended.
+    pub fn undo(&self) -> Result<()> {
+        let message = self.git(&["log", "-1", "--format=%B", UNDO_REF]).context("nothing to undo")?;
+        let record: UndoRecord = serde_json::from_str(message.trim()).context("unreadable undo record")?;
+        let tree = format!("{UNDO_REF}^{{tree}}");
+        self.mark_dirty(record.paths.iter().cloned());
+        for path in &record.paths {
+            if self.git(&["ls-tree", &tree, "--", path])?.trim().is_empty() {
+                self.remove(path)?;
+            } else {
+                self.git(&["restore", "--source", &tree, "--worktree", "--", path])?;
+            }
+        }
+        if let Some(session) = &record.session {
+            self.git(&["update-ref", SESSION_REF, session])?;
+        }
+        self.git(&["update-ref", "-d", UNDO_REF])?;
+        Ok(())
+    }
+
     /// Everything in the working tree that differs from `base`.
     pub fn changes(&self, base: &TreeId) -> Result<Changes> {
         self.changes_under(base, "")
@@ -315,6 +485,17 @@ impl Repo {
             _ => Ok(()),
         }
     }
+}
+
+/// Like [`git_output`], with extra environment variables.
+fn git_output_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd).args(args).envs(env.iter().copied()).stdin(Stdio::null());
+    let out = cmd.output().context("failed to run git")?;
+    if !out.status.success() {
+        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn git_output(cwd: &Path, args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<String> {

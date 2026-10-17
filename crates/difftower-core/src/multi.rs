@@ -110,6 +110,8 @@ impl Backend for Multi {
             files: Vec::new(),
             rules: Vec::new(),
             rules_error: None,
+            session: None,
+            can_undo: false,
         };
         let mut errors = Vec::new();
         for ((name, _), repo_status) in self.repos.iter().zip(statuses) {
@@ -124,6 +126,17 @@ impl Backend for Multi {
                 Some(glob) => format!("!{}", join(&dir, glob)),
                 None => join(&dir, rule),
             }));
+            // Sessions start together; the earliest start stands for them.
+            if let Some(session) = repo_status.session {
+                match &mut status.session {
+                    Some(all) => {
+                        all.started = all.started.min(session.started);
+                        all.commits.extend(session.commits);
+                    }
+                    all => *all = Some(session),
+                }
+            }
+            status.can_undo |= repo_status.can_undo;
             if let Some(err) = repo_status.rules_error {
                 errors.push(format!("{name}: {err}"));
             }
@@ -134,14 +147,48 @@ impl Backend for Multi {
         Ok(status)
     }
 
-    fn revert(&self, change: &Change) -> Result<()> {
-        let (repo, path) = self.locate(&change.path)?;
-        let old_path = match &change.old_path {
-            Some(old) => Some(self.locate(old)?.1.to_owned()),
-            None => None,
-        };
-        let change = Change { path: path.to_owned(), old_path, ..change.clone() };
-        repo.revert(&repo.head_tree()?, &change)
+    fn revert(&self, changes: &[Change], end_session: bool) -> Result<()> {
+        let mut by_repo: Vec<Vec<Change>> = vec![Vec::new(); self.repos.len()];
+        for change in changes {
+            let (ix, (_, path)) = self.locate_ix(&change.path)?;
+            let old_path = match &change.old_path {
+                Some(old) => Some(self.locate(old)?.1.to_owned()),
+                None => None,
+            };
+            by_repo[ix].push(Change { path: path.to_owned(), old_path, ..change.clone() });
+        }
+        for ((_, repo), changes) in self.repos.iter().zip(by_repo) {
+            if !changes.is_empty() || end_session {
+                repo.revert_all(&changes, end_session)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&self) -> Result<()> {
+        self.repos.iter().filter(|(_, repo)| repo.can_undo()).try_for_each(|(_, repo)| repo.undo())
+    }
+
+    fn start_session(&self) -> Result<()> {
+        self.repos.iter().try_for_each(|(_, repo)| repo.start_session())
+    }
+
+    fn end_session(&self) -> Result<()> {
+        self.repos.iter().try_for_each(|(_, repo)| repo.end_session())
+    }
+
+    fn accept(&self, paths: &[String]) -> Result<()> {
+        let mut by_repo: Vec<Vec<String>> = vec![Vec::new(); self.repos.len()];
+        for path in paths {
+            let (ix, (_, path)) = self.locate_ix(path)?;
+            by_repo[ix].push(path.to_owned());
+        }
+        for ((_, repo), paths) in self.repos.iter().zip(by_repo) {
+            if !paths.is_empty() {
+                repo.accept(&paths)?;
+            }
+        }
+        Ok(())
     }
 
     fn file_diff(&self, change: &Change) -> Result<String> {
@@ -152,7 +199,7 @@ impl Backend for Multi {
             None => None,
         };
         let change = Change { path: path.to_owned(), old_path, ..change.clone() };
-        repo.file_patch(&repo.head_tree()?, &change, name)
+        repo.file_patch(&repo.base_tree()?, &change, name)
     }
 
     fn read_file(&self, path: &str) -> Result<Vec<u8>> {

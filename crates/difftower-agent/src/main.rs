@@ -97,7 +97,11 @@ fn main() {
 fn handle(backend: &dyn Backend, request: Request) -> Result<Value> {
     Ok(match request {
         Request::Status => serde_json::to_value(backend.status()?)?,
-        Request::Revert { change } => to_null(backend.revert(&change)?),
+        Request::Revert { changes, end_session } => to_null(backend.revert(&changes, end_session)?),
+        Request::Undo => to_null(backend.undo()?),
+        Request::StartSession => to_null(backend.start_session()?),
+        Request::EndSession => to_null(backend.end_session()?),
+        Request::Accept { paths } => to_null(backend.accept(&paths)?),
         Request::ReadFile { path } => {
             if path.split('/').any(|part| part == "..") {
                 bail!("refusing to read outside the repository: {path}");

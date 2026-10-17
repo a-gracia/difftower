@@ -15,6 +15,6 @@ pub use backend::{Backend, Local, Status, open_path};
 pub use multi::Multi;
 pub use guard::{Guard, dir_rule, file_rule, load_rules, save_rules};
 pub use remote::{Remote, SshTarget};
-pub use repo::{Change, ChangeStatus, Changes, Repo, TreeId};
+pub use repo::{Change, ChangeStatus, Changes, Repo, Session, SessionCommit, TreeId};
 pub use testing::{CaseRef, Outcome, Runner, TestCase, TestEvent, TestSuite, TestTarget};
 pub use watch::{RepoWatcher, watch};

@@ -85,7 +85,7 @@ fn installs_the_agent_and_serves_a_repository() {
     assert!(remote.read_file("../outside").is_err());
 
     let spec = status.changes.iter().find(|c| c.path == "tests/spec.rs").unwrap();
-    remote.revert(spec).unwrap();
+    remote.revert(std::slice::from_ref(spec), false).unwrap();
     assert_eq!(fs::read_to_string(repo.join("tests/spec.rs")).unwrap(), "#[test] fn t() {}\n");
 
     // A second connection reuses the installed agent.

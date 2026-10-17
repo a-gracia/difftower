@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{Change, Runner, TestEvent, TestTarget};
 
 /// Bumped whenever a message changes shape.
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Call {
@@ -18,11 +18,15 @@ pub struct Call {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    Revert { change: Change },
+    Revert { changes: Vec<Change>, end_session: bool },
+    Undo,
     /// Answered with the file's bytes in standard base64.
     ReadFile { path: String },
     /// Answered with the patch as a string.
     FileDiff { change: Change },
+    StartSession,
+    EndSession,
+    Accept { paths: Vec<String> },
     SaveRules { rules: Vec<String> },
     /// Answered with every [`crate::TestSuite`].
     Tests,
