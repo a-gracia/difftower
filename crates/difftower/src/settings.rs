@@ -17,11 +17,20 @@ pub struct Settings {
     /// Side by side instead of unified.
     pub split: bool,
     pub soft_wrap: bool,
+    /// Look for a newer release on start.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { sidebar_width: 280., terminal_width: 560., show_terminal: true, split: false, soft_wrap: false }
+        Self {
+            sidebar_width: 280.,
+            terminal_width: 560.,
+            show_terminal: true,
+            split: false,
+            soft_wrap: false,
+            check_updates: true,
+        }
     }
 }
 

@@ -10,6 +10,7 @@ mod profile;
 mod recent;
 mod settings;
 mod terminal;
+mod update;
 mod workspace;
 
 use home::Home;

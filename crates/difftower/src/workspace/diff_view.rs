@@ -17,6 +17,8 @@ struct FileState {
     protected: bool,
     /// Protected and changed.
     violated: bool,
+    /// The change only adds lines.
+    additions_only: bool,
 }
 
 impl Workspace {
@@ -88,7 +90,11 @@ impl Workspace {
                 .gap_2()
                 .text_color(cx.theme().muted_foreground)
                 .child(Icon::new(IconName::CircleCheck).large())
-                .child("Working tree clean")
+                .child(if self.session.is_some() {
+                    "Nothing changed since the session started"
+                } else {
+                    "Nothing changed since the last commit"
+                })
                 .into_any_element();
         }
         if self.shown.is_none() {
@@ -110,12 +116,14 @@ impl Workspace {
                     let state = FileState {
                         protected: self.guard.is_protected(&c.path),
                         violated: self.violations.contains(&c.path),
+                        additions_only: self.only_additions(&c.path),
                     };
                     (c.path.clone(), state)
                 })
                 .collect(),
         );
         let this = cx.entity().downgrade();
+        let session = self.session.is_some();
 
         // Actions sit right after the file name, not at the end of the
         // header: the header is as wide as the longest line, so its end can
@@ -131,19 +139,34 @@ impl Workspace {
                 let state = states.get(&path);
                 let protected = state.is_some_and(|s| s.protected);
                 let violated = state.is_some_and(|s| s.violated);
-                let (pin, revert) = (this.clone(), this.clone());
-                let (pin_path, revert_path) = (path.clone(), path.clone());
+                let additions_only = state.is_some_and(|s| s.additions_only);
+                let (pin, revert, accept) = (this.clone(), this.clone(), this.clone());
+                let (pin_path, revert_path, accept_path) = (path.clone(), path.clone(), path.clone());
                 h_flex()
                     .gap_1()
                     .when(violated, |el| {
-                        el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(cx.theme().danger))
+                        let color = if additions_only { cx.theme().warning } else { cx.theme().danger };
+                        el.child(Icon::new(Lucide::ShieldAlert).xsmall().text_color(color))
+                    })
+                    .when(session, |el| {
+                        el.child(
+                            Button::new("accept")
+                                .xsmall()
+                                .ghost()
+                                .icon(Icon::new(IconName::Check))
+                                .tooltip("Accept this change")
+                                .on_click(move |_, window, cx| {
+                                    let paths = [accept_path.clone()];
+                                    accept.update(cx, |this, cx| this.accept(&paths, window, cx)).ok();
+                                }),
+                        )
                     })
                     .child(
                         Button::new("revert")
                             .xsmall()
                             .ghost()
                             .icon(IconName::Undo2)
-                            .tooltip("Revert this file")
+                            .tooltip("Revert this file; Undo brings it back")
                             .on_click(move |_, window, cx| {
                                 let paths = [revert_path.clone()];
                                 revert.update(cx, |this, cx| this.revert(&paths, window, cx)).ok();

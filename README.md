@@ -116,6 +116,7 @@ terminal keep their width and the diff takes the rest.
 | `Alt+Z` | Wrap long lines |
 | ``Ctrl+` `` | Move between the terminal and the diff |
 | `Ctrl+Shift+T` | Run every test |
+| `?` / `F1` | How Difftower works, and these keys |
 
 On Omarchy, Super+C and Super+V copy and paste in the terminal once
 Hyprland takes Difftower for a terminal; add to `~/.config/hypr/hyprland.lua`:
@@ -126,6 +127,16 @@ o.window("difftower", { tag = "+terminal" })
 
 `Ctrl+P` and the single letters work when the focus is outside the terminal,
 which keeps them for the shell: click the file list or the diff first.
+
+## Updates
+
+When a newer release is out, the status bar says so. If Difftower is
+installed where you can write, as `install.sh` does in `~/.local/bin`,
+**Update** downloads it, checks it against its published checksum and puts
+it in place, then **Restart** runs it; installed system-wide, run the
+installer again. The check is one request to GitHub's releases API on
+start, nothing else is sent, and `"check_updates": false` in
+`~/.config/difftower/settings.json` turns it off.
 
 ## Several repositories at once
 

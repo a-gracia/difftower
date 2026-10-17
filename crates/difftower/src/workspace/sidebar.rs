@@ -179,8 +179,39 @@ impl Workspace {
         let (letter, color) = status_style(change.status, cx);
         let (added, removed) = self.change_counts.get(ix).copied().unwrap_or_default();
         let selected = self.selected.as_deref() == Some(&path);
+        let alert = if self.only_additions(&path) { theme.warning } else { theme.danger };
+        let (accept_path, revert_path) = (path.clone(), path.clone());
+        let actions = h_flex()
+            .flex_none()
+            .opacity(0.)
+            .group_hover("change-row", |s| s.opacity(1.))
+            .when(self.session.is_some(), |el| {
+                el.child(
+                    Button::new(("accept-change", ix))
+                        .xsmall()
+                        .ghost()
+                        .icon(Icon::new(IconName::Check).text_color(theme.success))
+                        .tooltip("Accept this change")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.accept(std::slice::from_ref(&accept_path), window, cx)
+                        })),
+                )
+            })
+            .child(
+                Button::new(("revert-change", ix))
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(IconName::Undo2))
+                    .tooltip("Revert this file; Undo brings it back")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.revert(std::slice::from_ref(&revert_path), window, cx)
+                    })),
+            );
         h_flex()
             .id(("change", ix))
+            .group("change-row")
             // A virtual list sizes rows to their content otherwise, pushing
             // the status letter out of the panel.
             .w_full()
@@ -203,8 +234,9 @@ impl Workspace {
                     .child(div().truncate().text_size(DETAIL_SIZE).text_color(theme.muted_foreground).child(dir)),
             )
             .when(self.violations.contains(&path), |el| {
-                el.child(Icon::new(Lucide::ShieldAlert).small().text_color(theme.danger))
+                el.child(Icon::new(Lucide::ShieldAlert).small().text_color(alert))
             })
+            .child(actions)
             .child(
                 h_flex()
                     .flex_none()
@@ -388,15 +420,21 @@ impl Workspace {
         let modified: Vec<String> =
             self.violations.iter().filter(|p| self.guard.rule_for(p) == Some(ix)).cloned().collect();
         let ok = modified.is_empty();
+        // Only lines added: amber rather than red.
+        let additions_only = !ok && modified.iter().all(|p| self.only_additions(p));
+        let alert = if additions_only { theme.warning } else { theme.danger };
         let expanded = self.expanded_rules.contains(&pattern);
         let files_label = format!("{} file{}", covered.len(), if covered.len() == 1 { "" } else { "s" });
-        let (status, status_color) = if !ok {
-            (format!("{} modified", modified.len()), theme.danger)
+        let (status, status_color) = if additions_only {
+            (format!("{} extended", modified.len()), alert)
+        } else if !ok {
+            (format!("{} modified", modified.len()), alert)
         } else {
             (files_label.clone(), theme.muted_foreground)
         };
         let toggle = pattern.clone();
-        let revert_rule = modified.clone();
+        let (accept_rule, revert_rule, ask_rule) = (modified.clone(), modified.clone(), modified.clone());
+        let session = self.session.is_some();
 
         let header = h_flex()
             .id(("rule", ix))
@@ -415,9 +453,13 @@ impl Workspace {
             .child(
                 Icon::new(if ok { Lucide::ShieldCheck } else { Lucide::ShieldAlert })
                     .small()
-                    .text_color(if ok { theme.success } else { theme.danger }),
+                    .text_color(if ok { theme.success } else { alert }),
             )
-            .child(div().flex_1().min_w_0().truncate().child(pattern.clone()))
+            // A folder rule reads as a folder.
+            .when(pattern.ends_with("/**"), |el| {
+                el.child(Icon::new(IconName::FolderClosed).small().text_color(theme.muted_foreground))
+            })
+            .child(div().flex_1().min_w_0().truncate().child(pattern.strip_suffix("/**").map_or(pattern.clone(), |dir| format!("{dir}/"))))
             .child(div().flex_none().text_size(DETAIL_SIZE).text_color(status_color).child(status))
             .child(remove)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -436,8 +478,10 @@ impl Workspace {
         let rows = listed.into_iter().enumerate().map(|(file_ix, path)| {
             let id = ix * 100_000 + file_ix;
             let is_modified = modified.contains(path);
+            let file_alert = if self.only_additions(path) { theme.warning } else { theme.danger };
             let name = path.rsplit('/').next().unwrap_or(path);
-            let (open_path, revert_path, unprotect_path) = (path.clone(), path.clone(), path.clone());
+            let (open_path, accept_path, revert_path, unprotect_path) =
+                (path.clone(), path.clone(), path.clone(), path.clone());
             h_flex()
                 .h(ROW_HEIGHT)
                 .pl(px(8. + 3. * INDENT))
@@ -458,7 +502,7 @@ impl Workspace {
                         .child(
                             div()
                                 .flex_none()
-                                .when(is_modified, |el| el.text_color(theme.danger))
+                                .when(is_modified, |el| el.text_color(file_alert))
                                 .hover(|el| el.underline())
                                 .child(name.to_owned()),
                         )
@@ -471,13 +515,25 @@ impl Workspace {
                         )
                         .on_click(cx.listener(move |this, _, window, cx| this.open(&open_path, window, cx))),
                 )
+                .when(is_modified && session, |el| {
+                    el.child(
+                        Button::new(("accept-file", id))
+                            .xsmall()
+                            .ghost()
+                            .icon(Icon::new(IconName::Check).text_color(theme.success))
+                            .tooltip("Accept this change")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.accept(std::slice::from_ref(&accept_path), window, cx)
+                            })),
+                    )
+                })
                 .when(is_modified, |el| {
                     el.child(
                         Button::new(("revert-file", id))
                             .xsmall()
                             .ghost()
                             .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
-                            .tooltip("Revert this file")
+                            .tooltip("Revert this file; Undo brings it back")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.revert(std::slice::from_ref(&revert_path), window, cx)
                             })),
@@ -498,7 +554,7 @@ impl Workspace {
         v_flex()
             .border_b_1()
             .border_color(theme.border)
-            .when(!ok, |el| el.bg(theme.danger.opacity(0.08)))
+            .when(!ok, |el| el.bg(alert.opacity(0.08)))
             .child(header)
             .children(rows)
             .when(expanded && covered.len() > LISTED, |el| {
@@ -517,6 +573,16 @@ impl Workspace {
                         .pl(px(8. + 3. * INDENT))
                         .py_1()
                         .gap_1()
+                        .when(session, |el| {
+                            el.child(
+                                Button::new(("accept-rule", ix))
+                                    .xsmall()
+                                    .success()
+                                    .icon(IconName::Check)
+                                    .label("Accept")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.accept(&accept_rule, window, cx))),
+                            )
+                        })
                         .child(
                             Button::new(("revert-rule", ix))
                                 .xsmall()
@@ -524,7 +590,18 @@ impl Workspace {
                                 .icon(IconName::Undo2)
                                 .label("Revert")
                                 .on_click(cx.listener(move |this, _, window, cx| this.revert(&revert_rule, window, cx))),
-                        ),
+                        )
+                        .when(self.terminal.is_some(), |el| {
+                            el.child(
+                                Button::new(("ask-rule", ix))
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(Icon::new(Lucide::Bot))
+                                    .label("Ask agent")
+                                    .tooltip("Write a request in the terminal for the agent to restore these files; you press Enter")
+                                    .on_click(cx.listener(move |this, _, window, cx| this.ask_agent_to_fix(&ask_rule, window, cx))),
+                            )
+                        }),
                 )
             })
             .into_any_element()
@@ -547,7 +624,7 @@ enum Protection {
 /// The repository a path belongs to in a multi-repository workspace.
 /// The directory of the repository among `repos` that holds `path`; empty
 /// for the opened directory itself.
-fn repo_of<'a>(path: &str, repos: &'a [String]) -> &'a str {
+pub(super) fn repo_of<'a>(path: &str, repos: &'a [String]) -> &'a str {
     repos
         .iter()
         .filter(|repo| !repo.is_empty())

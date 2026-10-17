@@ -1,5 +1,6 @@
 mod diff_view;
 mod finder;
+mod help;
 mod main_panel;
 mod session;
 mod sidebar;
@@ -25,6 +26,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::{
+    update,
     file_tree::{self, FileTree, Row},
     settings::Settings,
     terminal::{TerminalCommand, TerminalView},
@@ -34,7 +36,7 @@ gpui_kit::actions!(
     workspace,
     [
         ShowChanges, ShowFiles, ShowProtected, ShowTests, ToggleWrap, NextFile, PreviousFile, NextChange,
-        PreviousChange, FindFile, ToggleTerminalFocus, RunAllTests
+        PreviousChange, FindFile, ToggleTerminalFocus, RunAllTests, ToggleHelp, CloseHelp
     ]
 );
 
@@ -56,6 +58,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-z", ToggleWrap, None),
         KeyBinding::new("ctrl-`", ToggleTerminalFocus, None),
         KeyBinding::new("ctrl-shift-t", RunAllTests, None),
+        KeyBinding::new("?", ToggleHelp, Some(NAVIGATION)),
+        KeyBinding::new("shift-?", ToggleHelp, Some(NAVIGATION)),
+        KeyBinding::new("f1", ToggleHelp, None),
+        KeyBinding::new("escape", CloseHelp, Some("Workspace && !Terminal")),
         // The X convention, and what Omarchy's Super+C and Super+V send to
         // windows it takes for terminals.
         KeyBinding::new("ctrl-insert", gpui_kit::component::input::Copy, Some("Root")),
@@ -157,6 +163,18 @@ pub struct Workspace {
     restore: Option<String>,
     /// Names this repository for what is kept between sessions.
     state_key: String,
+    /// The running session: changes are against its start instead of HEAD.
+    session: Option<difftower_core::Session>,
+    /// Whether the last revert can be undone.
+    can_undo: bool,
+    /// "Revert all" was clicked once; a second click within a few seconds
+    /// confirms it.
+    confirm_revert_all: bool,
+    /// Likewise for ending the session.
+    confirm_end_session: bool,
+    /// The help sheet is open.
+    show_help: bool,
+    update: Update,
     diff: Entity<DiffState>,
     /// Panel widths and diff layout, saved for the next session.
     settings: Settings,
@@ -256,6 +274,12 @@ impl Workspace {
             tab: session.tab.as_deref().and_then(SidebarTab::parse).unwrap_or(SidebarTab::Changes),
             restore: session.selected,
             state_key,
+            session: None,
+            can_undo: false,
+            confirm_revert_all: false,
+            confirm_end_session: false,
+            show_help: false,
+            update: Update::None,
             collapsed_repos: HashSet::new(),
             expanded_rules: HashSet::new(),
             tests,
@@ -287,7 +311,119 @@ impl Workspace {
         let diff = this.diff.clone();
         this.main_panel = Some(cx.new(|cx| main_panel::MainPanel::new(&workspace, &diff, cx)));
         this.refresh(window, cx);
+        this.check_for_update(cx);
         this
+    }
+
+    /// Looks for a newer release once per run, in the background.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        use std::sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        static FOUND: OnceLock<Mutex<Option<update::Release>>> = OnceLock::new();
+        if !self.settings.check_updates || update::install() == update::Install::Development {
+            return;
+        }
+        let found = FOUND.get_or_init(Mutex::default);
+        if let Some(release) = found.lock().unwrap().clone() {
+            self.update = Update::Available(release);
+            return;
+        }
+        if STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let Some(release) = cx.background_executor().spawn(async { update::check() }).await else { return };
+            *found.lock().unwrap() = Some(release.clone());
+            this.update(cx, |this, cx| {
+                this.update = Update::Available(release);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Replaces this binary with the release, then offers a restart.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let (Update::Available(release), update::Install::Writable(exe)) = (self.update.clone(), update::install())
+        else {
+            return;
+        };
+        self.update = Update::Installing(release.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let target = release.clone();
+            let result = cx.background_executor().spawn(async move { update::update(&target, &exe) }).await;
+            this.update(cx, |this, cx| {
+                this.update = match result {
+                    Ok(()) => Update::Ready(release),
+                    Err(err) => {
+                        this.error = Some(format!("Could not update: {err:#}").into());
+                        Update::Available(release)
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The update notice at the end of the status bar.
+    fn render_update(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let notice = |text: String| div().text_color(theme.primary).child(text);
+        Some(match &self.update {
+            Update::None => return None,
+            Update::Available(release) => {
+                let url = release.url.clone();
+                let writable = matches!(update::install(), update::Install::Writable(_));
+                h_flex()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .id("update-notes")
+                            .cursor_pointer()
+                            .text_color(theme.primary)
+                            .hover(|el| el.underline())
+                            .child(format!("Difftower {} is available", release.version))
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                    .child(if writable {
+                        Button::new("install-update")
+                            .xsmall()
+                            .primary()
+                            .label("Update")
+                            .on_click(cx.listener(|this, _, _, cx| this.install_update(cx)))
+                            .into_any_element()
+                    } else {
+                        Button::new("install-update")
+                            .xsmall()
+                            .ghost()
+                            .label("How to update")
+                            .tooltip("Installed where only root writes: run the installer again, with sudo")
+                            .on_click(|_, _, cx| cx.open_url("https://difftower.com/#install"))
+                            .into_any_element()
+                    })
+                    .into_any_element()
+            }
+            Update::Installing(release) => notice(format!("Updating to {}…", release.version)).into_any_element(),
+            Update::Ready(release) => h_flex()
+                .gap_1p5()
+                .child(notice(format!("Updated to {}", release.version)))
+                .child(
+                    Button::new("restart")
+                        .xsmall()
+                        .primary()
+                        .label("Restart")
+                        .on_click(|_, _, cx| {
+                            if update::relaunch().is_ok() {
+                                cx.quit();
+                            }
+                        }),
+                )
+                .into_any_element(),
+        })
     }
 
     /// Everything the center panel shows, so it renders only when this changes.
@@ -297,6 +433,7 @@ impl Workspace {
         self.changes.is_empty().hash(&mut hasher);
         (self.settings.soft_wrap, self.settings.split).hash(&mut hasher);
         (self.tests.show_output, self.tests.version).hash(&mut hasher);
+        self.session.is_some().hash(&mut hasher);
         if let Some(preview) = &self.preview {
             preview.path.hash(&mut hasher);
             preview.state.as_ref().map(|state| state.entity_id()).hash(&mut hasher);
@@ -338,7 +475,13 @@ impl Workspace {
     }
 
     fn apply(&mut self, status: Status, window: &mut Window, cx: &mut Context<Self>) {
-        let Status { changes, files, rules, rules_error } = status;
+        let Status { changes, files, rules, rules_error, session, can_undo } = status;
+        if self.session.is_some() != session.is_some() {
+            // The base changed: the shown file's diff must load again.
+            self.shown = None;
+        }
+        self.session = session;
+        self.can_undo = can_undo;
         match Guard::new(rules) {
             Ok(guard) => self.guard = guard,
             Err(err) => self.error = Some(format!("Invalid rule in .difftower.toml: {err}").into()),
@@ -516,27 +659,63 @@ impl Workspace {
         self.rows = Rc::new(self.tree.rows(&self.expanded));
     }
 
+    /// How alerts name touched protected files: by the folder or the file
+    /// their rule protects. Returns what to name, and the rules' names when
+    /// there are several, to follow the verb.
+    fn protected_subject(&self, paths: &[String]) -> (String, String) {
+        let n = paths.len();
+        let mut rules: Vec<usize> = paths
+            .iter()
+            .filter_map(|p| {
+                let old = self.change(p).and_then(|c| c.old_path.as_deref());
+                self.guard.rule_for(p).or_else(|| old.and_then(|o| self.guard.rule_for(o)))
+            })
+            .collect();
+        rules.sort_unstable();
+        rules.dedup();
+        let label = |ix: usize| {
+            let pattern = &self.guard.patterns()[ix];
+            match pattern.strip_suffix("/**") {
+                Some(dir) => (true, unescape_glob(dir)),
+                None => (false, unescape_glob(pattern)),
+            }
+        };
+        let files = if n == 1 { "file" } else { "files" };
+        match rules.as_slice() {
+            [rule] => match label(*rule) {
+                (true, dir) => (format!("{n} {files} in protected folder {dir}"), String::new()),
+                (false, file) if n == 1 => (format!("protected file {file}"), String::new()),
+                (false, glob) => (format!("{n} protected {files} ({glob})"), String::new()),
+            },
+            rules => {
+                let names: Vec<String> = rules
+                    .iter()
+                    .map(|&rule| match label(rule) {
+                        (true, dir) => format!("{dir}/"),
+                        (false, file) => file,
+                    })
+                    .collect();
+                (format!("{n} protected {files}"), format!(" · {}", names.join(", ")))
+            }
+        }
+    }
+
+    /// Whether the change to `path` only adds lines.
+    fn only_additions(&self, path: &str) -> bool {
+        self.change(path).is_some_and(|change| {
+            change.status != difftower_core::ChangeStatus::Deleted
+                && !change.patch.lines().any(|line| line.starts_with('-') && !line.starts_with("---"))
+        })
+    }
+
     fn change(&self, path: &str) -> Option<&Change> {
         self.change_index.get(path).map(|&ix| &self.changes[ix])
     }
 
+    /// Restores these files to the base; an undo puts them back.
     fn revert(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
         let changes: Vec<Change> = paths.iter().filter_map(|p| self.change(p).cloned()).collect();
-        let backend = self.backend.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { changes.iter().try_for_each(|change| backend.revert(change)) })
-                .await;
-            this.update_in(cx, |this, window, cx| {
-                if let Err(err) = result {
-                    this.error = Some(format!("Could not revert: {err:#}").into());
-                }
-                this.refresh(window, cx);
-            })
-            .ok();
-        })
-        .detach();
+        self.run_then_refresh("Could not revert", window, cx, move |backend| backend.revert(&changes, false));
     }
 
     /// Adds or removes a protection rule.
@@ -690,6 +869,115 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Snapshots the repository: from now on, what changes stays in view,
+    /// commits included, until accepted or reverted.
+    fn start_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_then_refresh("Could not start a session", window, cx, |backend| backend.start_session());
+    }
+
+    /// Accepts every change to protected files; the session goes on.
+    fn accept_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = self.violations.clone();
+        self.accept(&paths, window, cx);
+    }
+
+    /// Ends the session, on a second click: what changed in it is
+    /// accepted, and changes are against HEAD again.
+    fn end_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.confirm_end_session {
+            self.confirm_end_session = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                this.update(cx, |this, cx| {
+                    this.confirm_end_session = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        self.confirm_end_session = false;
+        self.run_then_refresh("Could not end the session", window, cx, |backend| backend.end_session());
+    }
+
+    /// Reverts every change to protected files, on a second click; an undo
+    /// brings them back.
+    fn revert_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.confirm_revert_all {
+            self.confirm_revert_all = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+                this.update(cx, |this, cx| {
+                    this.confirm_revert_all = false;
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        self.confirm_revert_all = false;
+        let paths = self.violations.clone();
+        self.revert(&paths, window, cx);
+    }
+
+    fn undo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_then_refresh("Could not undo", window, cx, |backend| backend.undo());
+    }
+
+    /// Accepts the changes to these files into the session; a rename's old
+    /// path goes with it.
+    fn accept(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let paths: Vec<String> = paths
+            .iter()
+            .flat_map(|p| {
+                let old = self.change(p).and_then(|c| c.old_path.clone());
+                std::iter::once(p.clone()).chain(old)
+            })
+            .collect();
+        self.run_then_refresh("Could not accept the change", window, cx, move |backend| backend.accept(&paths));
+    }
+
+    /// Writes into the terminal a request for the agent to undo its changes
+    /// to these protected files, without pressing Enter: you read it, then
+    /// send it. It points the agent at git rather than pasting contents.
+    fn ask_agent_to_fix(&mut self, paths: &[String], window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.clone() else { return };
+        let commits = self.session.as_ref().map(|s| s.commits.as_slice()).unwrap_or_default();
+        let prompt = fix_prompt(paths, &self.backend.repos(), commits);
+        terminal.read(cx).paste(&prompt);
+        if !self.settings.show_terminal {
+            self.toggle_terminal(cx);
+        }
+        terminal.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    fn run_then_refresh(
+        &mut self,
+        what: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        job: impl FnOnce(&dyn Backend) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let backend = self.backend.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { job(&*backend) }).await;
+            this.update_in(cx, |this, window, cx| {
+                if let Err(err) = result {
+                    this.error = Some(format!("{what}: {err:#}").into());
+                }
+                this.shown = None;
+                this.refresh(window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Moves the keyboard between the terminal and the rest of the window,
     /// showing the terminal if it was hidden.
     fn toggle_terminal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -792,85 +1080,89 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The top bar, in three parts: where you are, what is happening, and
+    /// your tools, work first and view after.
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let name = self.backend.name();
         let host = self.backend.host();
         let repo_count = self.backend.repos().len();
         let split = self.diff.read(cx).mode() == DiffMode::Split;
-        h_flex()
-            .h_10()
-            .px_3()
+        let divider = || div().w(px(1.)).h(px(18.)).mx_1().bg(theme.border);
+
+        // Where you are.
+        let place = h_flex()
             .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
+            .min_w_0()
             .child(
                 Button::new("home")
                     .small()
                     .ghost()
-                    .icon(Icon::new(Lucide::GitCompare).text_color(cx.theme().primary))
-                    .tooltip("Open another repository")
+                    .icon(Icon::new(Lucide::GitCompare).text_color(theme.primary))
+                    .tooltip("Back to the start screen")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(WorkspaceEvent::Close))),
             )
-            .child(div().font_semibold().child(name))
-            .when(repo_count > 1, |bar| {
-                bar.child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!("{repo_count} repos")))
+            .child(div().font_semibold().truncate().child(name))
+            .when(repo_count > 1, |el| {
+                el.child(div().flex_none().text_xs().text_color(theme.muted_foreground).child(format!("{repo_count} repos")))
             })
-            .when_some(host, |bar, host| {
-                bar.child(
+            .when_some(host, |el, host| {
+                el.child(
                     h_flex()
+                        .flex_none()
                         .gap_1()
                         .px_1p5()
                         .rounded_sm()
                         .text_xs()
-                        .bg(cx.theme().secondary)
-                        .text_color(cx.theme().secondary_foreground)
+                        .bg(theme.secondary)
+                        .text_color(theme.secondary_foreground)
                         .child(Icon::new(Lucide::Server).xsmall())
                         .child(host),
                 )
-            })
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("vs HEAD"),
-            )
-            .child(div().flex_1())
+            });
+
+        // Your tools: work, then view.
+        let tools = h_flex()
+            .flex_none()
+            .gap_1()
             .child(
                 Button::new("find-file")
                     .small()
                     .ghost()
                     .icon(Icon::new(Lucide::Search))
-                    .tooltip("Go to file (Ctrl+P)")
+                    .label("Go to file")
+                    .tooltip("Open any file by a few letters of its path (Ctrl+P)")
                     .on_click(cx.listener(|this, _, window, cx| this.open_finder(window, cx))),
             )
             .child(if self.tests.running() {
                 Button::new("run-tests")
                     .small()
                     .ghost()
-                    .icon(Icon::new(Lucide::CircleStop).text_color(cx.theme().danger))
+                    .icon(Icon::new(Lucide::CircleStop).text_color(theme.danger))
                     .label("Stop tests")
+                    .tooltip("Stop the tests running")
                     .on_click(cx.listener(|this, _, _, cx| this.stop_tests(cx)))
             } else {
                 Button::new("run-tests")
                     .small()
                     .ghost()
-                    .icon(Icon::new(Lucide::Play).text_color(cx.theme().success))
+                    .icon(Icon::new(Lucide::FlaskConical))
                     .label("Run tests")
-                    .tooltip("Run every test of every repository")
+                    .tooltip("Run every test of every repository (Ctrl+Shift+T)")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.run_all_tests(cx);
                         this.show_tab(SidebarTab::Tests, cx);
                     }))
             })
+            .child(divider())
             .child(
-                Button::new("terminal")
+                Button::new("mode")
                     .small()
                     .ghost()
-                    .icon(IconName::SquareTerminal)
-                    .selected(self.settings.show_terminal)
-                    .tooltip("Toggle terminal")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
+                    .icon(Icon::new(Lucide::Columns2))
+                    .label(if split { "Split" } else { "Unified" })
+                    .tooltip(if split { "Showing old and new side by side; click for one column" } else { "Showing one column; click for old and new side by side" })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
             )
             .child(
                 Button::new("wrap")
@@ -882,13 +1174,163 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_wrap(cx))),
             )
             .child(
-                Button::new("mode")
+                Button::new("terminal")
                     .small()
                     .ghost()
-                    .icon(Icon::new(Lucide::Columns2))
-                    .label(if split { "Split" } else { "Unified" })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_mode(cx))),
-            )
+                    .icon(IconName::SquareTerminal)
+                    .selected(self.settings.show_terminal)
+                    .tooltip("Show or hide the terminal; Ctrl+` moves the keyboard to it")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
+            );
+
+        h_flex()
+            .h_10()
+            .px_3()
+            .gap_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .child(place)
+            .child(divider())
+            .children(self.render_activity(cx))
+            .child(div().flex_1())
+            .child(tools)
+    }
+
+    /// What is happening: the session, with the control that changes it,
+    /// and protected files the agent touched, with what to do about them.
+    fn render_activity(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme = cx.theme();
+        let mut items = Vec::new();
+        match &self.session {
+            None => {
+                items.push(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Changes since the last commit")
+                        .into_any_element(),
+                );
+                items.push(
+                    Button::new("session")
+                        .small()
+                        .outline()
+                        .icon(Icon::new(Lucide::Play))
+                        .label("Start session")
+                        .tooltip("Keep what changes from now in view, even after an agent commits it, until you accept or revert it")
+                        .on_click(cx.listener(|this, _, window, cx| this.start_session(window, cx)))
+                        .into_any_element(),
+                );
+            }
+            Some(session) => {
+                items.push(
+                    h_flex()
+                        .id("session-status")
+                        .flex_none()
+                        .gap_1()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .text_xs()
+                        .bg(theme.primary.opacity(0.15))
+                        .text_color(theme.primary)
+                        .child(div().size(px(7.)).rounded_full().bg(theme.primary))
+                        .child(format!("Session{}", since(session.started)))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(
+                                "Changes since the session started, commits included: an agent committing hides nothing",
+                            )
+                            .build(window, cx)
+                        })
+                        .into_any_element(),
+                );
+                items.push(
+                    Button::new("session")
+                        .small()
+                        .when(self.confirm_end_session, |b| b.danger())
+                        .when(!self.confirm_end_session, |b| b.ghost())
+                        .icon(Icon::new(Lucide::Square).text_color(theme.danger))
+                        .label(if self.confirm_end_session { "Click again to end" } else { "End session" })
+                        .tooltip("Accept what changed in the session and go back to changes since the last commit")
+                        .on_click(cx.listener(|this, _, window, cx| this.end_session(window, cx)))
+                        .into_any_element(),
+                );
+            }
+        }
+        if !self.violations.is_empty() {
+            let (subject, rules) = self.protected_subject(&self.violations);
+            let files = format!("{subject}{rules}");
+            let additions_only = self.violations.iter().all(|p| self.only_additions(p));
+            let alert = if additions_only { theme.warning } else { theme.danger };
+            items.push(div().w(px(1.)).h(px(18.)).bg(theme.border).into_any_element());
+            items.push(
+                h_flex()
+                    .id("protected-alert")
+                    .flex_none()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(alert)
+                    .cursor_pointer()
+                    .child(Icon::new(Lucide::ShieldAlert).xsmall())
+                    .child(format!("{} protected changed", self.violations.len()))
+                    .tooltip({
+                        let files = files.clone();
+                        move |window, cx| gpui_kit::component::tooltip::Tooltip::new(files.clone()).build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.show_tab(SidebarTab::Protected, cx)))
+                    .into_any_element(),
+            );
+            if self.session.is_some() {
+                items.push(
+                    Button::new("accept-all")
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(IconName::Check).text_color(theme.success))
+                        .label("Accept all")
+                        .tooltip(format!("Accept the changes to {files}; they stop being flagged"))
+                        .on_click(cx.listener(|this, _, window, cx| this.accept_all(window, cx)))
+                        .into_any_element(),
+                );
+            }
+            items.push(
+                Button::new("revert-all")
+                    .small()
+                    .when(self.confirm_revert_all, |b| b.danger())
+                    .when(!self.confirm_revert_all, |b| b.ghost())
+                    .icon(Icon::new(IconName::Undo2).text_color(theme.danger))
+                    .label(if self.confirm_revert_all { "Click again to revert" } else { "Revert all" })
+                    .tooltip(format!("Put back {files} as they were; Undo brings the changes back"))
+                    .on_click(cx.listener(|this, _, window, cx| this.revert_all(window, cx)))
+                    .into_any_element(),
+            );
+            if self.terminal.is_some() {
+                let paths = self.violations.clone();
+                items.push(
+                    Button::new("ask-agent")
+                        .small()
+                        .ghost()
+                        .icon(Icon::new(Lucide::Bot))
+                        .label("Ask agent to fix")
+                        .tooltip("Write a request in the terminal for the agent to restore these files; you press Enter")
+                        .on_click(cx.listener(move |this, _, window, cx| this.ask_agent_to_fix(&paths, window, cx)))
+                        .into_any_element(),
+                );
+            }
+        }
+        if self.can_undo {
+            items.push(
+                Button::new("undo-revert")
+                    .small()
+                    .ghost()
+                    .icon(Icon::new(IconName::Redo2))
+                    .label("Undo revert")
+                    .tooltip("Bring back what the last revert put back")
+                    .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx)))
+                    .into_any_element(),
+            );
+        }
+        items
     }
 
     fn render_terminal(&self, terminal: Entity<TerminalView>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -920,13 +1362,21 @@ impl Workspace {
     /// The bottom bar: protection status at a glance, colored by state.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let test_status = self.render_test_status(cx);
+        let update = self.render_update(cx);
         let theme = cx.theme();
         let rules = self.guard.patterns().len();
         let violated = !self.violations.is_empty();
+        // Only lines added to protected files: worth a look, less alarming.
+        let additions_only = violated && self.violations.iter().all(|p| self.only_additions(p));
+        let alert = if additions_only { theme.warning } else { theme.danger };
         let (icon, color, label) = if violated {
-            let n = self.violations.len();
-            let label = format!("{n} protected file{} modified", if n == 1 { "" } else { "s" });
-            (Lucide::ShieldAlert, theme.danger, label)
+            let (subject, rules) = self.protected_subject(&self.violations);
+            let label = if additions_only {
+                format!("{subject} extended{rules} · only additions")
+            } else {
+                format!("{subject} modified{rules}")
+            };
+            (Lucide::ShieldAlert, alert, label)
         } else if rules > 0 {
             let label = format!("Protected files intact · {rules} rule{}", if rules == 1 { "" } else { "s" });
             (Lucide::ShieldCheck, theme.success, label)
@@ -941,8 +1391,8 @@ impl Workspace {
             .gap_3()
             .text_xs()
             .border_t_1()
-            .border_color(if violated { theme.danger } else { theme.border })
-            .bg(if violated { theme.danger.opacity(0.18) } else { theme.status_bar })
+            .border_color(if violated { alert } else { theme.border })
+            .bg(if violated { alert.opacity(0.18) } else { theme.status_bar })
             .text_color(theme.muted_foreground)
             .child(
                 h_flex()
@@ -955,20 +1405,30 @@ impl Workspace {
                     .child(label)
                     .on_click(cx.listener(|this, _, _, cx| this.show_tab(SidebarTab::Protected, cx))),
             )
-            .when(violated, |bar| {
-                let paths = self.violations.clone();
-                bar.child(
-                    Button::new("revert-protected")
-                        .xsmall()
-                        .danger()
-                        .icon(IconName::Undo2)
-                        .label("Revert all")
-                        .on_click(cx.listener(move |this, _, window, cx| this.revert(&paths, window, cx))),
-                )
-            })
             .children(test_status)
             .child(div().flex_1())
-            .children(self.error.clone().map(|err| div().truncate().text_color(theme.danger).child(err)))
+            .children(self.error.clone().map(|err| {
+                h_flex()
+                    .id("error")
+                    .min_w_0()
+                    .gap_1()
+                    .text_color(theme.danger)
+                    .child(Icon::new(IconName::CircleX).xsmall().flex_none())
+                    .child(div().truncate().child(err.clone()))
+                    .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(err.clone()).build(window, cx))
+                    .child(
+                        Button::new("dismiss-error")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("Dismiss")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.error = None;
+                                cx.notify();
+                            })),
+                    )
+            }))
+            .children(update)
             .when(!self.changes.is_empty(), |bar| {
                 bar.child(
                     h_flex()
@@ -978,6 +1438,14 @@ impl Workspace {
                         .child(div().text_color(theme.red).child(format!("−{deletions}"))),
                 )
             })
+            .child(
+                Button::new("help")
+                    .xsmall()
+                    .ghost()
+                    .icon(Icon::new(Lucide::CircleQuestionMark))
+                    .tooltip("How Difftower works, and its keys (? or F1)")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_help(window, cx))),
+            )
     }
 }
 
@@ -1000,6 +1468,7 @@ impl Render for Workspace {
             sidebar_width = (sidebar_width - (overflow - from_terminal)).max(MIN_SIDEBAR_WIDTH);
         }
         let finder = self.render_finder(window, cx);
+        let help = self.render_help(cx);
         let theme = cx.theme();
         v_flex()
             .size_full()
@@ -1022,6 +1491,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowProtected, _, cx| this.show_tab(SidebarTab::Protected, cx)))
             .on_action(cx.listener(|this, _: &ShowTests, _, cx| this.show_tab(SidebarTab::Tests, cx)))
             .on_action(cx.listener(|this, _: &ToggleWrap, _, cx| this.toggle_wrap(cx)))
+            .on_action(cx.listener(|this, _: &ToggleHelp, window, cx| this.toggle_help(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseHelp, window, cx| {
+                if this.show_help {
+                    this.toggle_help(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.drag_divider(event.position.x, window, cx)
             }))
@@ -1063,8 +1540,90 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
             .children(finder)
+            .children(help)
             // Painted last: the end of the frame for DIFFTOWER_PROFILE.
             .child(canvas(|_, _, _| {}, |_, _, _, _| crate::profile::frame_end()).absolute().size_0())
+    }
+}
+
+/// A glob as its plain path: `globset::escape` brackets special characters.
+fn unescape_glob(glob: &str) -> String {
+    let mut out = String::with_capacity(glob.len());
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let mut inner = chars.clone();
+            if let (Some(x), Some(']')) = (inner.next(), inner.next()) {
+                out.push(x);
+                chars = inner;
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// What the agent is asked to restore protected `paths` to: one line, so a
+/// terminal without bracketed paste does not send it, naming the commit to
+/// compare with rather than carrying contents. That is each repository's
+/// session commit, accepted changes included, or HEAD without a session; in
+/// a directory of repositories, git needs `-C` for each.
+fn fix_prompt(paths: &[String], repos: &[String], commits: &[difftower_core::SessionCommit]) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for path in paths {
+        let repo = sidebar::repo_of(path, repos);
+        let relative = if repo.is_empty() { path.as_str() } else { &path[repo.len() + 1..] };
+        match groups.iter_mut().find(|(r, _)| *r == repo) {
+            Some((_, files)) => files.push(relative),
+            None => groups.push((repo, vec![relative])),
+        }
+    }
+    let commit_of = |repo: &str| {
+        commits.iter().find(|c| c.repo == repo).map_or("HEAD", |c| c.hash.as_str()).to_owned()
+    };
+    let refs: Vec<String> = groups.iter().map(|(repo, _)| commit_of(repo)).collect();
+    let shown = if refs.iter().all(|r| r == &refs[0]) {
+        if refs[0] == "HEAD" { "in HEAD".to_owned() } else { format!("in commit {}", refs[0]) }
+    } else {
+        "in the commits below".to_owned()
+    };
+    let commands: Vec<String> = groups
+        .iter()
+        .zip(&refs)
+        .map(|((repo, files), commit)| {
+            let git = if repo.is_empty() { "git".to_owned() } else { format!("git -C {repo}") };
+            format!("`{git} diff {commit} -- {}`", files.join(" "))
+        })
+        .collect();
+    let show = if refs.len() == 1 { format!("`git show {}:<path>`", refs[0]) } else { "`git show <commit>:<path>`".to_owned() };
+    format!(
+        "These files are protected and must not change: {}. Restore them to how they were {shown} \
+         (see what changed with {}; the original is {show}), then make your change work without modifying them.",
+        paths.join(", "),
+        commands.join(" and ")
+    )
+}
+
+/// A newer release, from being found to being installed.
+#[derive(Clone)]
+enum Update {
+    None,
+    Available(update::Release),
+    Installing(update::Release),
+    /// Installed: a restart runs it.
+    Ready(update::Release),
+}
+
+/// " · 2h ago" for a session that started at `started`, a Unix time.
+fn since(started: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    match now - started {
+        _ if started <= 0 => String::new(),
+        s if s < 60 => " · just now".to_owned(),
+        s if s < 3600 => format!(" · {}m ago", s / 60),
+        s if s < 86_400 => format!(" · {}h ago", s / 3600),
+        s => format!(" · {}d ago", s / 86_400),
     }
 }
 
@@ -1085,4 +1644,42 @@ fn hash(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use difftower_core::SessionCommit;
+
+    use super::{fix_prompt, unescape_glob};
+
+    #[test]
+    fn names_globs_as_their_paths() {
+        assert_eq!(unescape_glob("app/examples"), "app/examples");
+        assert_eq!(unescape_glob("docs/v[*]2"), "docs/v*2");
+    }
+
+    #[test]
+    fn asks_the_agent_to_restore_protected_files_in_one_line() {
+        let commits = [SessionCommit { repo: "".into(), hash: "3f2a1b9".into() }];
+        let prompt = fix_prompt(&["tests/a.ts".into()], &["".into()], &commits);
+        assert!(!prompt.contains('\n'), "a newline would send it: {prompt}");
+        assert!(prompt.contains("must not change: tests/a.ts. Restore them to how they were in commit 3f2a1b9"), "{prompt}");
+        assert!(prompt.contains("`git diff 3f2a1b9 -- tests/a.ts`"), "{prompt}");
+        assert!(prompt.contains("`git show 3f2a1b9:<path>`"), "{prompt}");
+
+        // Without a session, HEAD; in a directory of repositories, `-C`
+        // and each repository's own commit.
+        let repos = ["".into(), "api".into(), "web".into()];
+        let paths = ["api/tests/a.py".into(), "api/tests/b.py".into(), "web/x.ts".into()];
+        let prompt = fix_prompt(&paths, &repos, &[]);
+        assert!(prompt.contains("`git -C api diff HEAD -- tests/a.py tests/b.py` and `git -C web diff HEAD -- x.ts`"), "{prompt}");
+        assert!(prompt.contains("how they were in HEAD"), "{prompt}");
+        let commits = [
+            SessionCommit { repo: "api".into(), hash: "aaa1111".into() },
+            SessionCommit { repo: "web".into(), hash: "bbb2222".into() },
+        ];
+        let prompt = fix_prompt(&paths, &repos, &commits);
+        assert!(prompt.contains("`git -C api diff aaa1111 -- tests/a.py tests/b.py` and `git -C web diff bbb2222 -- x.ts`"), "{prompt}");
+        assert!(prompt.contains("in the commits below") || prompt.contains("`git show <commit>:<path>`"), "{prompt}");
+    }
 }
