@@ -18,9 +18,10 @@
   </g>
   <g font-family="Inter, Helvetica, Arial, sans-serif" fill="#e6edf3">
     <text x="470" y="250" font-size="84" font-weight="700" letter-spacing="-2">Difftower</text>
-    <text x="472" y="320" font-size="38" fill="#8b949e">A control tower for</text>
-    <text x="472" y="368" font-size="38" fill="#8b949e">your <tspan fill="#58a6ff">coding agents</tspan>.</text>
-    <text x="472" y="452" font-size="26" fill="#6e7681">Not an IDE · live diff · protected files · tests · SSH</text>
+    <text x="472" y="318" font-size="40" fill="#e6edf3" font-weight="600">Review everything your</text>
+    <text x="472" y="366" font-size="40" fill="#e6edf3" font-weight="600">agent did. <tspan fill="#58a6ff">Even after</tspan></text>
+    <text x="472" y="414" font-size="40" fill="#58a6ff" font-weight="600">it commits.</text>
+    <text x="472" y="470" font-size="25" fill="#6e7681">Sessions · protected files · tests · SSH · open source</text>
   </g>
   <text x="472" y="520" font-family="JetBrains Mono, monospace" font-size="24" fill="#3fb950">difftower.com</text>
 </svg>
