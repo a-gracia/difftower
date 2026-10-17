@@ -1003,24 +1003,37 @@ impl Workspace {
 fn test_stem(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     let mut stem = name.split('.').next().unwrap_or(name);
-    for suffix in ["_test", "_spec"] {
-        stem = stem.strip_suffix(suffix).unwrap_or(stem);
+    // `_test.go`, `_spec.rb`, `UserTest.java`, `UserTests.cs`, `UserSpec.kt`.
+    for suffix in ["_test", "_tests", "_spec", "Test", "Tests", "Spec"] {
+        if let Some(rest) = stem.strip_suffix(suffix).filter(|rest| !rest.is_empty()) {
+            stem = rest;
+            break;
+        }
     }
-    stem.strip_prefix("test_").unwrap_or(stem).to_owned()
+    stem.strip_prefix("test_").unwrap_or(stem).to_lowercase()
 }
 
 /// Failures in red and passes in green, as the runners print them.
 fn line_color(line: &str, theme: &gpui_kit::component::Theme) -> Hsla {
     let trimmed = line.trim_start();
-    let failed = trimmed.starts_with('×')
+    let failed = trimmed.starts_with(['×', '✗', '✘', '✖'])
         || trimmed.starts_with("FAILED")
+        || trimmed.starts_with("FAIL ")
         || trimmed.starts_with("ERROR")
         || trimmed.starts_with("E ")
-        || trimmed.starts_with('✗')
+        || trimmed.starts_with("--- FAIL")
+        || trimmed.starts_with("(fail)")
+        || trimmed.starts_with("not ok ")
         || line.contains(" FAILED")
         || line.ends_with(" = F")
         || line.ends_with(" = E");
-    let passed = trimmed.starts_with('✓') || line.contains(" PASSED") || line.ends_with(" = .");
+    let passed = trimmed.starts_with(['✓', '✔', '√'])
+        || trimmed.starts_with("PASS ")
+        || trimmed.starts_with("--- PASS")
+        || trimmed.starts_with("(pass)")
+        || line.contains(" PASSED")
+        || line.ends_with(" ... ok")
+        || line.ends_with(" = .");
     if failed {
         theme.danger
     } else if passed {
@@ -1105,7 +1118,19 @@ mod tests {
 
     #[test]
     fn a_source_file_and_its_tests_share_a_stem() {
-        for path in ["app/models/user.rb", "test/models/user_test.rb", "tests/test_user.py", "src/user.test.ts", "user_spec.rb"] {
+        for path in [
+            "app/models/user.rb",
+            "test/models/user_test.rb",
+            "tests/test_user.py",
+            "src/user.test.ts",
+            "user_spec.rb",
+            "user_test.go",
+            "src/main/java/User.java",
+            "src/test/java/UserTest.java",
+            "Tests/UserTests.cs",
+            "tests/UserTest.php",
+            "test/user_test.exs",
+        ] {
             assert_eq!(test_stem(path), "user", "{path}");
         }
         assert_ne!(test_stem("app/models/users.rb"), "user");

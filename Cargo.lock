@@ -1286,6 +1286,7 @@ dependencies = [
  "globset",
  "ignore",
  "notify",
+ "roxmltree 0.20.0",
  "serde",
  "serde_json",
  "tempfile",
