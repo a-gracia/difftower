@@ -312,9 +312,10 @@
         <pre>curl -fsSL https://difftower.com/install.sh | sh</pre>
       </div>
       <div class="way">
-        <h3>Arch, Omarchy</h3>
-        <p>From the AUR.</p>
-        <pre>yay -S difftower-bin</pre>
+        <h3>For everyone</h3>
+        <p>Into <code>/usr/local</code> instead of your home.</p>
+        <pre>curl -fsSL https://difftower.com/install.sh \
+  | sudo DIFFTOWER_PREFIX=/usr/local sh</pre>
       </div>
       <div class="way">
         <h3>From source</h3>
