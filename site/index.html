@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Difftower — a control tower for coding agents</title>
-<meta name="description" content="Not an IDE. A fast, native window that shows everything your coding agents change, guards the files they must not touch and runs your tests, locally or over SSH. Free and open source.">
+<title>Difftower — review everything your agent did</title>
+<meta name="description" content="Start a session, let your coding agent work and commit, then review everything it did as one live diff: accept or revert file by file. Protected files, tests and a terminal included. Free, open source, native.">
 <meta name="theme-color" content="#0d1117">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="canonical" href="https://difftower.com/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://difftower.com/">
-<meta property="og:title" content="Difftower — a control tower for coding agents">
-<meta property="og:description" content="Not an IDE. Watch every change your agents make, guard the files they must not touch, run your tests. Native, fast, open source.">
+<meta property="og:title" content="Difftower — review everything your agent did, even after it commits">
+<meta property="og:description" content="Start a session, let the agent work and commit, and review all of it as one live diff. Accept or revert file by file. Free and open source.">
 <meta property="og:image" content="https://difftower.com/og.png">
 <meta property="og:video" content="https://difftower.com/demo.mp4">
 <meta name="twitter:card" content="summary_large_image">
@@ -91,48 +91,7 @@
 
   .demo { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #0a0d12; box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.8); }
 
-  /* App mock */
   .shot { margin: 56px auto 0; max-width: 1060px; }
-  .window {
-    border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0a0d12;
-    box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.02);
-    text-align: left; font-size: 12.5px;
-  }
-  .bar { display: flex; align-items: center; gap: 10px; white-space: nowrap; height: 38px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--panel); }
-  .bar img { width: 16px; }
-  .bar b { font-weight: 600; }
-  .chip { font-size: 11px; color: var(--muted); background: #21262d; border-radius: 5px; padding: 1px 7px; }
-  .bar .sp { flex: 1; }
-  .bar .run { color: var(--green); font-size: 12px; }
-  .panes { display: grid; grid-template-columns: 236px 1fr 64px 290px; height: 380px; }
-  .side { border-right: 1px solid var(--line); background: #0f141a; padding: 8px 0; overflow: hidden; }
-  .tabs { display: flex; gap: 2px; white-space: nowrap; padding: 0 8px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px; color: var(--muted); font-size: 11.5px; }
-  .tabs span { padding: 2px 7px; border-radius: 5px; }
-  .tabs .on { background: #21262d; color: var(--text); }
-  .row { display: flex; align-items: center; gap: 7px; padding: 3px 12px; white-space: nowrap; }
-  .row .n { font-weight: 500; }
-  .row .d { color: var(--faint); overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
-  .row .c { margin-left: auto; font-size: 11px; }
-  .row.sel { background: rgba(88, 166, 255, 0.12); }
-  .m { color: var(--yellow); } .a { color: var(--green); } .r { color: var(--red); }
-  .diff { font-family: var(--mono); font-size: 12px; overflow: hidden; border-right: 1px solid var(--line); }
-  .diff .head { display: flex; gap: 10px; padding: 7px 12px; border-bottom: 1px solid var(--line); font-family: var(--sans); font-size: 12px; color: var(--muted); }
-  .diff .head b { color: var(--text); font-weight: 560; }
-  .ln { display: grid; grid-template-columns: 34px 14px 1fr; padding-right: 10px; line-height: 19px; white-space: pre; }
-  .ln i { color: var(--faint); font-style: normal; text-align: right; padding-right: 8px; }
-  .ln.add { background: var(--green-bg); } .ln.add u { color: var(--green); }
-  .ln.del { background: var(--red-bg); } .ln.del u { color: var(--red); }
-  .ln u { text-decoration: none; }
-  .k { color: #ff7b72; } .f { color: #d2a8ff; } .s { color: #a5d6ff; } .nm { color: #79c0ff; } .cm { color: var(--faint); }
-  .mini { position: relative; background: #0b0f14; border-right: 1px solid var(--line); }
-  .mini span { position: absolute; left: 8px; height: 2px; border-radius: 1px; background: rgba(230, 237, 243, 0.32); }
-  .mini .view { position: absolute; left: 0; right: 0; top: 14%; height: 36%; background: rgba(230, 237, 243, 0.07); }
-  .term { background: #0a0d12; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 19px; color: #c9d1d9; overflow: hidden; }
-  .term .p { color: var(--green); }
-  .term .q { color: var(--blue); }
-  .status { display: flex; gap: 18px; white-space: nowrap; overflow: hidden; align-items: center; height: 30px; padding: 0 14px; font-size: 11.5px; border-top: 1px solid var(--red); background: rgba(248, 81, 73, 0.15); color: var(--muted); }
-  .status .alert { color: var(--red); font-weight: 600; }
-  .status .sp { flex: 1; }
   .caption { text-align: center; color: var(--faint); font-size: 13px; margin-top: 14px; }
 
   /* Sections */
@@ -160,7 +119,7 @@
   .stats span { color: var(--muted); font-size: 14px; }
 
   .ways { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 36px; }
-  .way { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
+  .way { min-width: 0; background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
   .way h3 { margin: 0 0 4px; font-size: 16px; }
   .way p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
   .way pre { margin: 0; background: #0a0d12; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; font-size: 13px; overflow-x: auto; white-space: pre; }
@@ -175,21 +134,75 @@
   footer .sp { flex: 1; }
   footer a:hover { color: var(--text); }
 
+  /* Problem: what git diff sees and what a session sees */
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 40px; }
+  .lane { background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); padding: 24px; }
+  .lane h3 { margin: 0 0 4px; font-size: 16px; }
+  .lane > p { margin: 0 0 22px; color: var(--muted); font-size: 14.5px; }
+  .track { position: relative; display: flex; align-items: center; gap: 0; height: 64px; }
+  .track::before { content: ""; position: absolute; left: 6px; right: 6px; top: 50%; height: 2px; background: var(--line); }
+  .node { position: relative; flex: 1; display: flex; justify-content: center; }
+  .node i { width: 14px; height: 14px; border-radius: 50%; background: var(--bg); border: 2px solid var(--faint); }
+  .node.wip i { border-style: dashed; }
+  .node small { position: absolute; top: 22px; font-size: 11.5px; color: var(--faint); white-space: nowrap; font-family: var(--mono); }
+  .node.start i { background: var(--blue); border-color: var(--blue); box-shadow: 0 0 0 4px rgba(88, 166, 255, 0.2); }
+  .node.start small { color: var(--blue); }
+  .seen { position: absolute; top: 2px; height: 22px; border: 2px solid; border-bottom: none; border-radius: 8px 8px 0 0; }
+  .seen.git { right: 6%; width: 18%; border-color: var(--faint); }
+  .seen.dt { left: 18%; right: 6%; border-color: var(--green); }
+  .lane > p.verdict { margin: 34px 0 0; font-size: 14px; }
+  .verdict.bad { color: var(--red); } .verdict.good { color: var(--green); }
+
+  /* How a session works */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 40px; counter-reset: step; }
+  .step { border-top: 2px solid var(--line); padding-top: 18px; }
+  .step:first-child { border-color: var(--blue); }
+  .step::before { counter-increment: step; content: counter(step); display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--panel); border: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--muted); }
+  .step b { display: block; font-size: 17px; margin: 12px 0 6px; letter-spacing: -0.01em; }
+  .step p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  /* A drawing of Difftower's top bar */
+  .topbar { margin-top: 36px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; font-size: 13.5px; }
+  .topbar .name { font-weight: 600; }
+  .topbar .div { width: 1px; height: 18px; background: var(--line); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 6px; background: rgba(88, 166, 255, 0.14); color: var(--blue); font-size: 12.5px; }
+  .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .act { color: var(--muted); }
+  .act.warn { color: var(--yellow); }
+  .act.ok::before { content: "✓ "; color: var(--green); }
+  .act.no::before { content: "↶ "; color: var(--red); }
+
+  /* Guardrails */
+  .guard { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+  .checks { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 14px; }
+  .checks li { display: grid; grid-template-columns: 22px 1fr; gap: 10px; color: var(--muted); font-size: 15px; }
+  .checks li::before { content: "→"; color: var(--blue); }
+  .checks b { color: var(--text); font-weight: 560; }
+  .alertcard { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; font-size: 13px; }
+  .alertcard .head { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .alertcard pre { margin: 0; padding: 12px 0; font-size: 12.5px; line-height: 20px; background: #0a0d12; overflow-x: auto; }
+  .alertcard pre span { display: block; padding: 0 16px; }
+  .alertcard .add { background: var(--green-bg); color: #aff5b4; }
+  .alertcard .del { background: var(--red-bg); color: #ffdcd7; }
+  .alertcard .foot { padding: 9px 16px; border-top: 1px solid var(--red); background: rgba(248, 81, 73, 0.14); color: var(--red); font-weight: 600; font-size: 12.5px; }
+
+  /* Questions */
+  .faq { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 48px; margin-top: 36px; }
+  .faq b { display: block; font-size: 16px; margin-bottom: 6px; }
+  .faq p { margin: 0; color: var(--muted); font-size: 15px; }
+
   @media (max-width: 900px) {
-    .panes { grid-template-columns: 180px 1fr 0 0; }
-    .mini, .term { display: none; }
-    .grid, .pitch, .ways { grid-template-columns: 1fr; }
+    .grid, .pitch, .ways, .compare, .steps, .faq { grid-template-columns: 1fr; }
+    .guard { grid-template-columns: 1fr; gap: 28px; }
     .remote { grid-template-columns: 1fr; gap: 28px; }
     nav .links .hide-sm { display: none; }
   }
   @media (max-width: 560px) {
     .wrap { padding: 0 16px; }
     .hero { padding-top: 56px; }
-    .panes { grid-template-columns: 1fr; height: 300px; }
-    .side { display: none; }
-    .bar .chip, .status span:not(.alert):not(.r) { display: none; }
     .install { font-size: 13px; }
     .sponsor { padding: 28px; }
+    .node small { font-size: 9.5px; }
   }
 </style>
 </head>
@@ -199,7 +212,8 @@
   <div class="wrap">
     <a class="brand" href="#"><img src="icon.svg" alt="">Difftower</a>
     <div class="links">
-      <a class="hide-sm" href="#features">Features</a>
+      <a class="hide-sm" href="#sessions">Sessions</a>
+      <a class="hide-sm" href="#guardrails">Guardrails</a>
       <a class="hide-sm" href="#remote">SSH</a>
       <a href="#install">Install</a>
       <a class="gh" href="https://github.com/a-gracia/difftower">
@@ -213,8 +227,8 @@
 <header class="hero">
   <div class="wrap">
     <span class="eyebrow"><span class="dot"></span>Free and open source · Linux</span>
-    <h1>A control tower for your <span class="accent">coding agents</span>.</h1>
-    <p class="lede">Not an IDE. <strong>Agents write the code now; you supervise it.</strong> Difftower shows every change they make as they make it, guards the files they must not touch, and runs your tests — on your machine or on a server over SSH.</p>
+    <h1>Review everything your agent did. <span class="accent">Even after it commits.</span></h1>
+    <p class="lede">Start a session, hand the work to Claude Code, Codex or any agent, and come back to <strong>one live diff of all of it</strong>, every commit included. Accept what is right, revert what is not, file by file.</p>
     <div class="install">
       <span class="prompt">$</span><code id="cmd">curl -fsSL https://difftower.com/install.sh | sh</code>
       <button class="copy" data-copy="cmd">Copy</button>
@@ -223,61 +237,121 @@
       <a class="btn primary" href="https://github.com/a-gracia/difftower">Star on GitHub</a>
       <a class="btn ghost" href="https://github.com/sponsors/a-gracia"><span class="heart">♥</span> Sponsor</a>
     </div>
-    <p class="fine">Rust + GPUI · native and GPU-rendered · no telemetry · macOS soon</p>
+    <p class="fine">Native, in Rust · works with any agent · no account, no telemetry · macOS soon</p>
 
     <div class="shot">
       <video class="demo" src="demo.mp4" poster="demo-poster.jpg" autoplay muted loop playsinline controls
-        aria-label="Difftower demo: protecting a test, Claude Code fixing a bug, the protected test flagged, tests passing and a commit"></video>
-      <p class="caption">A real run: Claude Code fixes a bug and edits a protected test. Difftower flags it the moment it happens.</p>
+        aria-label="Difftower demo: a session starts; Claude Code fixes two bugs and commits each one, so git shows nothing, while Difftower shows all of it, including a test added to the protected folder, which is accepted before the session ends"></video>
+      <p class="caption">A real run, sped up where Claude Code is thinking.</p>
     </div>
   </div>
 </header>
 
 <main class="wrap">
   <section>
-    <span class="kicker">Why</span>
-    <h2>You are not editing code anymore. You are reviewing it.</h2>
-    <p class="sub">Editors were built for typing. When an agent writes the code, what you need is to see what it changed, stop it from touching what it must not, and know whether the tests still pass.</p>
-    <div class="pitch">
-      <div><b>See everything</b><p>Every file that differs from HEAD, live, with the whole file around each change.</p></div>
-      <div><b>Guard what matters</b><p>Protect tests, migrations or lockfiles. The status bar turns red the moment an agent touches one.</p></div>
-      <div><b>Trust, then commit</b><p>Run the tests the change affects. There is nothing to approve: you accept a change by committing it.</p></div>
+    <span class="kicker">The problem</span>
+    <h2>Agents commit. Your diff goes blank.</h2>
+    <p class="sub">An agent that works for twenty minutes makes five commits along the way. <code>git diff</code> shows only what is left uncommitted, so you review commit by commit, or you don't. That is how a test quietly edited to pass gets through.</p>
+    <div class="compare">
+      <div class="lane">
+        <h3>git diff</h3>
+        <p>Against the last commit: whatever the agent committed is already out of sight.</p>
+        <div class="track">
+          <span class="seen git"></span>
+          <div class="node"><i></i><small>you</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node wip"><i></i><small>uncommitted</small></div>
+        </div>
+        <p class="verdict bad">Sees the last few lines.</p>
+      </div>
+      <div class="lane">
+        <h3>A Difftower session</h3>
+        <p>Against where your code stood when the session started, however many commits ago.</p>
+        <div class="track">
+          <span class="seen dt"></span>
+          <div class="node start"><i></i><small>session</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node"><i></i><small>agent</small></div>
+          <div class="node wip"><i></i><small>uncommitted</small></div>
+        </div>
+        <p class="verdict good">Sees everything the agent did.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="sessions">
+    <span class="kicker">Sessions</span>
+    <h2>One click before the agent starts. One review when it is done.</h2>
+    <div class="steps">
+      <div class="step"><b>Start a session</b><p>Difftower marks where your code stands right now. Your branches and history are left as they are.</p></div>
+      <div class="step"><b>Let the agent work</b><p>It edits, commits, edits again. Every change shows up live, and none of it drops out of view when it commits.</p></div>
+      <div class="step"><b>Accept or revert</b><p>File by file, or all at once. Accepted files leave the list; reverted ones go back to how they were. A revert can be undone.</p></div>
+      <div class="step"><b>End the session</b><p>Done reviewing: Difftower goes back to showing changes since the last commit. Closing the app in between loses nothing.</p></div>
+    </div>
+    <div class="topbar" aria-label="Difftower's top bar during a session">
+      <span class="name">billing</span><span class="div"></span>
+      <span class="pill">Session · 25m ago</span><span class="act">■ End session</span><span class="div"></span>
+      <span class="act warn">⚠ 1 protected changed</span><span class="act ok">Accept all</span><span class="act no">Revert all</span><span class="act">Ask agent to fix</span>
+    </div>
+  </section>
+
+  <section id="guardrails">
+    <div class="guard">
+      <div>
+        <span class="kicker">Guardrails</span>
+        <h2>Some files the agent should not touch.</h2>
+        <p class="sub">Shield a test, a migration or a lockfile from the file tree. If the agent changes one, you know at once, and you choose what happens next.</p>
+        <ul class="checks">
+          <li><span><b>Flagged the moment it happens:</b> red when lines change, amber when the agent only added some.</span></li>
+          <li><span><b>Ask the agent to put it back:</b> Difftower writes the request in the terminal, naming the commit to restore from. You press Enter.</span></li>
+          <li><span><b>Then run the tests:</b> pytest, vitest and Rails, found on their own. All of them, a folder, a file or one test.</span></li>
+          <li><span><b>Shared with your team:</b> the rules live in <code>.difftower.toml</code>, in the repository.</span></li>
+        </ul>
+      </div>
+      <div class="alertcard" aria-label="A protected test the agent edited">
+        <div class="head"><b>tests/invoice.test.ts</b><span class="act" style="color: var(--red)">protected</span></div>
+        <pre><span>  it("rounds totals to the cent", () =&gt; {</span><span class="del">-   expect(total(items)).toBe(10.07);</span><span class="add">+   expect(total(items)).toBeCloseTo(10.07, 1);</span><span>  });</span></pre>
+        <div class="foot">⚠ protected file tests/invoice.test.ts modified</div>
+      </div>
     </div>
   </section>
 
   <section id="features">
-    <span class="kicker">Features</span>
-    <h2>Small, fast, and only what supervision needs.</h2>
+    <span class="kicker">Everything else</span>
+    <h2>Only what supervising an agent needs.</h2>
     <div class="grid">
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="9"/></svg>
-        <h3>Live diff against HEAD</h3>
-        <p>Untracked files included, updated as the agent writes. Unified or split, syntax highlighted, with a minimap to find your way.</p>
-      </div>
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <h3>Protected files</h3>
-        <p>Shield a file or folder from the tree. Rules live in <code>.difftower.toml</code>, so the team shares them. Revert in one click.</p>
-      </div>
-      <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6L4 20a1 1 0 0 0 .9 1.5h14.2A1 1 0 0 0 20 20L15 8V2M8 2h8M7 15h10"/></svg>
-        <h3>Your tests, one click away</h3>
-        <p>pytest, vitest and Rails, found on their own. Run all, a folder, a file, the failed ones or the ones the change affects.</p>
+        <h3>A diff that keeps up</h3>
+        <p>Updated as the agent writes, new files included. Unified or split, highlighted, with a minimap. Thousands of files stay smooth.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 9l3 3-3 3M12 15h6"/></svg>
-        <h3>A terminal for the agent</h3>
-        <p>Run Claude Code, Codex or any CLI agent right next to its diff, in the repository, local or remote.</p>
+        <h3>The agent, right beside it</h3>
+        <p>A terminal in the same window, in the repository: run Claude Code, Codex, Aider or any CLI agent next to its diff.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <h3>Many repositories, one window</h3>
-        <p>Open a folder of repositories and see all of them together, each with its own rules and tests.</p>
+        <p>Open a folder of repositories: one session, one diff and one test list across all of them.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-        <h3>Native and fast</h3>
-        <p>Written in Rust on GPUI, the framework behind Zed. Rendered on the GPU, starts at once, no Electron.</p>
+        <h3>Native and light</h3>
+        <p>Rust on GPUI, the framework behind Zed. Rendered on the GPU, opens at once. No Electron.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+        <h3>Keyboard first</h3>
+        <p>Go to any file with Ctrl+P, step through files and changes with j, k, n, p. Press ? for the rest.</p>
+      </div>
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5"/></svg>
+        <h3>Keeps itself current</h3>
+        <p>It tells you when a new version is out, and updates itself in one click.</p>
       </div>
     </div>
   </section>
@@ -287,7 +361,7 @@
       <div>
         <span class="kicker">Over SSH</span>
         <h2>Your agents run on a server. So does Difftower.</h2>
-        <p class="sub">Point it at <code>user@host:path</code>. It installs a tiny static agent there on first connection, watches the repository on the host and sends only diffs. Your keys and <code>~/.ssh/config</code> work as usual, and it reconnects on its own.</p>
+        <p class="sub">Point it at <code>user@host:path</code>. It installs a tiny agent there on first connection, watches the repository on the host and sends only diffs. Sessions, protected files and tests work the same. Your keys and <code>~/.ssh/config</code> work as usual.</p>
         <div class="stats">
           <div><b>3 MB</b><span>agent on the host</span></div>
           <div><b>~5 MB</b><span>of RAM, idle at 0% CPU</span></div>
@@ -302,13 +376,24 @@
     </div>
   </section>
 
+  <section id="faq">
+    <span class="kicker">Questions</span>
+    <h2>Before you try it.</h2>
+    <div class="faq">
+      <div><b>Does a session touch my git history?</b><p>No. It is a git ref under <code>refs/difftower/</code>, kept out of your branches, your log and your pushes. Ending the session deletes it.</p></div>
+      <div><b>What if I close Difftower mid-session?</b><p>Nothing is lost. The session lives in the repository, so the next time you open it, it picks up where you left.</p></div>
+      <div><b>Which agents does it work with?</b><p>Any of them. Difftower watches the files and git, not the agent, so Claude Code, Codex, Aider or a script all look the same.</p></div>
+      <div><b>Is it an editor?</b><p>No, on purpose. It shows, guards, tests and reverts. Writing the code is the agent's job, and your editor is still there for yours.</p></div>
+    </div>
+  </section>
+
   <section id="install">
     <span class="kicker">Install</span>
     <h2>One line, no root.</h2>
     <div class="ways">
       <div class="way">
         <h3>Any Linux</h3>
-        <p>Installs into <code>~/.local</code>, with a launcher entry.</p>
+        <p>Into <code>~/.local</code>, with a launcher entry. Updates itself.</p>
         <pre>curl -fsSL https://difftower.com/install.sh | sh</pre>
       </div>
       <div class="way">
@@ -321,7 +406,7 @@
         <h3>From source</h3>
         <p>Rust, git, clang and lld.</p>
         <pre>git clone https://github.com/a-gracia/difftower
-cd difftower && cargo dt</pre>
+cd difftower &amp;&amp; cargo dt</pre>
       </div>
     </div>
     <p class="req">Needs Linux x86_64 with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch) and git. macOS is next.</p>
@@ -330,7 +415,7 @@ cd difftower && cargo dt</pre>
   <div class="sponsor">
     <div>
       <h2>Free, and staying free.</h2>
-      <p>Difftower is open source under MIT or Apache-2.0, built by one developer. If it saves you a bad merge, a sponsorship keeps it going.</p>
+      <p>Difftower is open source under MIT or Apache-2.0, built by one developer in Colombia. If it saves you from a bad merge, a sponsorship keeps it going.</p>
     </div>
     <a class="btn primary" href="https://github.com/sponsors/a-gracia"><span class="heart">♥</span> Sponsor on GitHub</a>
   </div>
@@ -344,6 +429,7 @@ cd difftower && cargo dt</pre>
     <a href="https://github.com/a-gracia/difftower">GitHub</a>
     <a href="https://github.com/a-gracia/difftower/releases">Releases</a>
     <a href="https://github.com/sponsors/a-gracia">Sponsor</a>
+    <a href="https://x.com/andresgrda">@andresgrda</a>
   </div>
 </footer>
 

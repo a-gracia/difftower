@@ -1,39 +1,61 @@
 # Difftower
 
-**A control tower for coding agents.** Difftower is a fast, native diff
-monitor for the way code gets written now: an agent edits, you supervise.
+**Review everything your agent did. Even after it commits.**
 
-![Claude Code fixes a bug and edits a protected test; Difftower flags it, the tests pass, and a commit clears it](site/demo.gif)
+Start a session, hand the work to Claude Code, Codex or any agent, and
+come back to one live diff of all of it, every commit included. Accept
+what is right and revert what is not, file by file. Difftower also guards
+the files the agent must not touch and runs your tests, locally or on a
+server over SSH.
+
+![A session starts; Claude Code fixes two bugs and commits each one, so git shows nothing, while Difftower shows all of it, the test it added to a protected folder included; it is accepted, the tests pass and the session ends](site/demo.gif)
 
 [Watch the full demo](https://difftower.com/demo.mp4) · [difftower.com](https://difftower.com)
 
-It is not an editor. It shows, live, everything your agents changed
-against HEAD, lets you read it file by file, guards the files agents must
-not touch and runs your tests. Locally or on a server over SSH, one
-repository or several at once.
+It is not an editor: it shows, guards, tests and reverts.
+
+## Sessions
+
+Agents commit as they work, and `git diff` only shows what is left
+uncommitted. A session keeps the whole run in view:
+
+1. **Start session** in the top bar marks where your code stands: HEAD
+   when you click it.
+2. The agent edits and commits as it likes. Every change since the start
+   stays in the diff, live, commits included.
+3. **Accept** a file once you have read it, and it leaves the list;
+   **Revert** puts it back as it was when the session started (**Undo
+   revert** brings it back). Protected files the agent touched get
+   **Accept all**, **Revert all** and **Ask agent to fix**, which writes a
+   request in the terminal naming the commit to restore from.
+4. **End session** when you are done: changes are against HEAD again.
+
+A session is a commit at `refs/difftower/session` in the repository, out
+of your branches, log and pushes, so it survives restarts. Without one,
+Difftower shows changes since the last commit.
 
 ## Features
 
-- **Live diff of your repo.** Everything that differs from HEAD, untracked
-  files included, updated as the agent writes.
+- **Live diff of your repo.** Everything that differs from HEAD, or from
+  the start of the session, untracked files included, updated as the
+  agent writes.
 - **Read it like a pull request.** The selected file is shown in full with
   its changes, next to a minimap of the file with its changes tinted and
   the part in view boxed, as in VS Code; click or drag it to move. `+`/`−`
   counts per file. Unified or split view (each side scrolls sideways on its own)
-  and syntax highlighting. There is nothing to approve: a change is
-  accepted when you commit it.
+  and syntax highlighting.
 - **File tree.** Browse every file in the repository, see which folders
   contain changes, and open unchanged files read-only, or jump to any file
   with `Ctrl+P`.
 - **Protected files and folders.** Protect tests, migrations or whole
   folders from the tree. The status bar turns red the moment an agent
   touches one, with a single count however many files it hit, and the
-  Protected tab lists each rule with what changed under it. Revert one
-  file, one rule or everything in a click; the alert stays until the
-  change is reverted or committed.
+  Protected tab lists each rule with what changed under it. Accept or
+  revert one file, one rule or everything in a click. Amber instead of red
+  when the agent only added lines.
 - **Tests.** Run every test, a folder, a file or a single test, the ones
   that failed, or the ones for the files that changed. See below.
-- **Revert any file** to HEAD.
+- **Revert any file** to HEAD or the start of the session, and undo it.
 - **Integrated terminal** to run your agent right next to its diff.
 - **Notifications.** While the window is in the background, a desktop
   notification tells you when an agent touches a protected file or a test
@@ -178,7 +200,9 @@ prompt (use a key or an SSH agent).
 
 The working tree, untracked files included, is written as a git tree
 through a private index file (`.git/difftower/index`) and diffed against
-HEAD. Your own index, branches and stash are never touched.
+HEAD, or against the session commit at `refs/difftower/session`. A revert
+records what it replaced at `refs/difftower/undo`. Your own index,
+branches and stash are never touched.
 
 ## Credits
 
@@ -208,6 +232,7 @@ at the top left of a workspace goes back to it.
 ## Roadmap
 
 - [x] Live diff against HEAD, protected files
+- [x] Sessions: review an agent's whole run, commits included
 - [x] Integrated terminal to run agents side by side
 - [x] Remote folders over SSH via a tiny server-side agent
 - [x] Several repositories in one workspace
