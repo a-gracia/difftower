@@ -1,5 +1,8 @@
-# Builds the Linux binary on a version tag (`git tag v0.1.0 && git push --tags`)
-# and publishes it, with its checksum, as a GitHub release.
+# Builds Difftower for Linux and macOS on a version tag
+# (`git tag v0.2.0 && git push --tags`) and publishes the binaries, with
+# their checksums, as a GitHub release. A tag with a hyphen, such as
+# v0.2.0-beta.1, is published as a pre-release, which the installer and the
+# update check skip unless asked for it.
 name: Release
 
 on:
@@ -11,14 +14,47 @@ permissions:
   contents: write
 
 jobs:
-  linux:
-    # The oldest supported Ubuntu: its glibc sets the oldest distribution
-    # the binary runs on.
+  # The agent installed on remote hosts is a static Linux binary, which only
+  # Linux can link; every build embeds this one.
+  agent:
     runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent
+      - name: Build the agent
+        run: |
+          RUSTFLAGS=-Ctarget-feature=+crt-static cargo build --release --locked \
+            -p difftower-agent --target x86_64-unknown-linux-gnu
+          ./target/x86_64-unknown-linux-gnu/release/difftower-agent --version || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: difftower-agent
+          path: target/x86_64-unknown-linux-gnu/release/difftower-agent
+
+  build:
+    needs: agent
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported Ubuntu: its glibc sets the oldest
+          # distribution the binary runs on.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          # Intel Macs, built on Apple silicon.
+          - os: macos-15
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
       - name: Install build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -27,40 +63,74 @@ jobs:
             libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libssl-dev
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: difftower-agent
+          path: agent
+
+      - name: Use the agent built on Linux
+        run: echo "DIFFTOWER_AGENT=$PWD/agent/difftower-agent" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked -p difftower
+        run: cargo build --release --locked -p difftower --target ${{ matrix.target }}
 
       - name: Check the binary runs
-        run: ./target/release/difftower --version
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: ./target/${{ matrix.target }}/release/difftower --version
+
+      # Reported, but not blocking a release while macOS is in beta.
+      - name: Test the core
+        if: matrix.target != 'x86_64-apple-darwin'
+        continue-on-error: ${{ runner.os == 'macOS' }}
+        # Two tests start an interactive login shell and signal its process
+        # group, which the Linux runner takes as its own shutdown; they run
+        # on macOS and on developers' machines.
+        run: |
+          skip=""
+          if [ "$RUNNER_OS" = Linux ]; then
+            skip="--skip runs_and_reports_each_test --skip dropping_a_run_stops_it"
+          fi
+          cargo test --release --locked -p difftower-core --target ${{ matrix.target }} -- $skip
 
       - name: Package
-        id: package
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          if [ "$GITHUB_REF_TYPE" != tag ]; then version="0.0.0-dev"; fi
-          name=difftower-x86_64-unknown-linux-gnu
+          name=difftower-${{ matrix.target }}
           mkdir -p "dist/$name"
-          cp target/release/difftower packaging/difftower.desktop packaging/difftower.svg \
+          cp target/${{ matrix.target }}/release/difftower packaging/difftower.svg \
             LICENSE-MIT LICENSE-APACHE README.md "dist/$name/"
+          if [ "$RUNNER_OS" = Linux ]; then cp packaging/difftower.desktop "dist/$name/"; fi
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "archive=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
 
       - name: Upload the build
         uses: actions/upload-artifact@v7
         with:
-          name: difftower-linux
+          name: difftower-${{ matrix.target }}
           path: dist/*.tar.gz*
 
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish the release
-        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in *-*) pre=--prerelease ;; *) pre= ;; esac
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
-            --title "Difftower ${{ steps.package.outputs.version }}" \
-            --generate-notes
+            --title "Difftower $version" --generate-notes $pre

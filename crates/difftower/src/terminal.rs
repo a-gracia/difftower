@@ -237,10 +237,17 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // Cmd+C and Cmd+V on macOS, where Ctrl+C must still interrupt.
         let paste = (mods.control && mods.shift && keystroke.key == "v")
-            || (mods.shift && !mods.control && keystroke.key == "insert");
+            || (mods.shift && !mods.control && keystroke.key == "insert")
+            || (mods.platform && keystroke.key == "v");
         let copy = (mods.control && mods.shift && keystroke.key == "c")
-            || (mods.control && !mods.shift && keystroke.key == "insert");
+            || (mods.control && !mods.shift && keystroke.key == "insert")
+            || (mods.platform && keystroke.key == "c");
+        // Other Cmd shortcuts belong to the app, as in any macOS terminal.
+        if mods.platform && !paste && !copy && cfg!(target_os = "macos") {
+            return;
+        }
         if paste {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 self.paste(&text);
@@ -368,11 +375,14 @@ impl Render for TerminalView {
 }
 
 /// The system's monospace font. GPUI does not resolve fontconfig aliases,
-/// so ask fontconfig for the concrete family once.
+/// so ask fontconfig for the concrete family once; macOS has Menlo.
 pub(crate) fn monospace_family() -> SharedString {
     static FAMILY: OnceLock<SharedString> = OnceLock::new();
     FAMILY
         .get_or_init(|| {
+            if cfg!(target_os = "macos") {
+                return "Menlo".into();
+            }
             std::process::Command::new("fc-match")
                 .args(["-f", "%{family[0]}", "monospace"])
                 .output()

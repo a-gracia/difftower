@@ -1,4 +1,4 @@
-//! Go to file: `Ctrl+P` and a few letters of a path, matched in order.
+//! Go to file: `Ctrl+P` (`Cmd+P` on macOS) and a few letters of a path, matched in order.
 
 use std::rc::Rc;
 

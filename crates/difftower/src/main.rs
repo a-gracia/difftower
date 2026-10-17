@@ -28,6 +28,8 @@ Options:
   -V, --version    show the version
 ";
 
+gpui_kit::actions!(difftower, [Quit]);
+
 fn main() {
     // `difftower [path | user@host:path]`; with no argument, the start screen.
     let location = std::env::args().nth(1);
@@ -53,6 +55,12 @@ fn main() {
         workspace::bind_keys(cx);
         terminal::bind_keys(cx);
         cx.on_window_closed(|cx, _| cx.quit()).detach();
+        // macOS shows an application menu, and quits with Cmd+Q.
+        cx.on_action(|_: &Quit, cx| cx.quit());
+        if cfg!(target_os = "macos") {
+            cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+            cx.set_menus([Menu::new("Difftower").items([MenuItem::action("Quit Difftower", Quit)])]);
+        }
 
         let options = WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some("Difftower".into()), ..Default::default() }),

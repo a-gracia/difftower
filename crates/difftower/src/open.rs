@@ -35,6 +35,9 @@ pub fn open(location: &str, progress: &dyn Fn(&str)) -> Result<Opened> {
             })
         }
         Some(target) => {
+            if AGENT.is_empty() {
+                anyhow::bail!("this build of Difftower cannot open remote repositories yet");
+            }
             let remote = Remote::connect(target, AGENT, progress)?;
             let (program, args) = remote.target().shell(&remote.root());
             Ok(Opened {

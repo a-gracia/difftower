@@ -40,6 +40,9 @@ gpui_kit::actions!(
     ]
 );
 
+/// The modifier of shortcuts, as `secondary-` binds it: Cmd on macOS.
+pub(crate) const MOD_KEY: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+
 /// Where single letters navigate: not while typing in the terminal or a
 /// search field.
 const NAVIGATION: &str = "Workspace && !Terminal && !Command";
@@ -50,14 +53,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("k", PreviousFile, Some(NAVIGATION)),
         KeyBinding::new("n", NextChange, Some(NAVIGATION)),
         KeyBinding::new("p", PreviousChange, Some(NAVIGATION)),
-        KeyBinding::new("ctrl-p", FindFile, Some(NAVIGATION)),
-        KeyBinding::new("ctrl-1", ShowChanges, None),
-        KeyBinding::new("ctrl-2", ShowFiles, None),
-        KeyBinding::new("ctrl-3", ShowProtected, None),
-        KeyBinding::new("ctrl-4", ShowTests, None),
+        KeyBinding::new("secondary-p", FindFile, Some(NAVIGATION)),
+        KeyBinding::new("secondary-1", ShowChanges, None),
+        KeyBinding::new("secondary-2", ShowFiles, None),
+        KeyBinding::new("secondary-3", ShowProtected, None),
+        KeyBinding::new("secondary-4", ShowTests, None),
         KeyBinding::new("alt-z", ToggleWrap, None),
         KeyBinding::new("ctrl-`", ToggleTerminalFocus, None),
-        KeyBinding::new("ctrl-shift-t", RunAllTests, None),
+        KeyBinding::new("secondary-shift-t", RunAllTests, None),
         KeyBinding::new("?", ToggleHelp, Some(NAVIGATION)),
         KeyBinding::new("shift-?", ToggleHelp, Some(NAVIGATION)),
         KeyBinding::new("f1", ToggleHelp, None),
@@ -541,14 +544,24 @@ impl Workspace {
             .save(&self.state_key);
     }
 
-    /// A desktop notification, when the window is not in front.
+    /// A desktop notification, when the window is not in front: through
+    /// `notify-send`, or AppleScript on macOS.
     fn notify_user(&self, title: &str, body: &str) {
         if self.window_active {
             return;
         }
-        let name = self.backend.name();
-        let _ = std::process::Command::new("notify-send")
-            .args(["--app-name=Difftower", &format!("{name}: {title}"), body])
+        let title = format!("{}: {title}", self.backend.name());
+        let mut command = if cfg!(target_os = "macos") {
+            let quoted = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+            let mut command = std::process::Command::new("osascript");
+            command.arg("-e").arg(format!("display notification {} with title {}", quoted(body), quoted(&title)));
+            command
+        } else {
+            let mut command = std::process::Command::new("notify-send");
+            command.args(["--app-name=Difftower", &title, body]);
+            command
+        };
+        let _ = command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -1131,7 +1144,7 @@ impl Workspace {
                     .ghost()
                     .icon(Icon::new(Lucide::Search))
                     .label("Go to file")
-                    .tooltip("Open any file by a few letters of its path (Ctrl+P)")
+                    .tooltip(format!("Open any file by a few letters of its path ({MOD_KEY}+P)"))
                     .on_click(cx.listener(|this, _, window, cx| this.open_finder(window, cx))),
             )
             .child(if self.tests.running() {
@@ -1148,7 +1161,7 @@ impl Workspace {
                     .ghost()
                     .icon(Icon::new(Lucide::FlaskConical))
                     .label("Run tests")
-                    .tooltip("Run every test of every repository (Ctrl+Shift+T)")
+                    .tooltip(format!("Run every test of every repository ({MOD_KEY}+Shift+T)"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.run_all_tests(cx);
                         this.show_tab(SidebarTab::Tests, cx);

@@ -1,7 +1,8 @@
 //! Keeping Difftower current: on start, a look for a newer release, and for
 //! a binary its user can write, as `install.sh` puts it in `~/.local/bin`,
-//! replacing it in place. It uses the system's `curl`, `sha256sum` and
-//! `tar`, as the installer does, and sends nothing but the request.
+//! replacing it in place. It uses the system's `curl`, `sha256sum` (or
+//! `shasum` on macOS) and `tar`, as the installer does, and sends nothing
+//! but the request.
 
 use std::{
     path::{Path, PathBuf},
@@ -11,7 +12,12 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 
 const REPO: &str = "a-gracia/difftower";
-const ASSET: &str = "difftower-x86_64-unknown-linux-gnu";
+/// The release archive built for this platform.
+const ASSET: &str = if cfg!(target_os = "macos") {
+    if cfg!(target_arch = "aarch64") { "difftower-aarch64-apple-darwin" } else { "difftower-x86_64-apple-darwin" }
+} else {
+    "difftower-x86_64-unknown-linux-gnu"
+};
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,9 +78,13 @@ fn parse_latest(json: &str) -> Option<Release> {
     Some(Release { version: tag.trim_start_matches('v').to_owned(), url: url.to_owned() })
 }
 
-/// Whether version `a` comes after `b`, comparing numbers part by part.
+/// Whether version `a` comes after `b`, comparing numbers part by part; a
+/// pre-release such as `0.2.0-beta.1` comes before its release.
 pub fn newer(a: &str, b: &str) -> bool {
-    let parts = |v: &str| -> Vec<u64> { v.split(['.', '-']).map_while(|p| p.parse().ok()).collect() };
+    let parts = |v: &str| -> (Vec<u64>, bool) {
+        let (release, pre) = v.split_once('-').map_or((v, None), |(r, p)| (r, Some(p)));
+        (release.split('.').map_while(|p| p.parse().ok()).collect(), pre.is_none())
+    };
     parts(a) > parts(b)
 }
 
@@ -96,7 +106,14 @@ fn download_and_replace(release: &Release, exe: &Path, dir: &Path) -> Result<()>
         run(Command::new("curl").args(["-fsSL", "-m", "300", "-o", &name, &format!("{base}/{name}")]).current_dir(dir))
             .with_context(|| format!("could not download {name}"))?;
     }
-    run(Command::new("sha256sum").args(["-c", &format!("{archive}.sha256")]).current_dir(dir))
+    let mut check = if cfg!(target_os = "macos") {
+        let mut command = Command::new("shasum");
+        command.args(["-a", "256"]);
+        command
+    } else {
+        Command::new("sha256sum")
+    };
+    run(check.args(["-c", &format!("{archive}.sha256")]).current_dir(dir))
         .context("the download does not match its checksum")?;
     run(Command::new("tar").args(["-xzf", &archive]).current_dir(dir)).context("could not unpack the download")?;
 
@@ -141,6 +158,9 @@ mod tests {
         assert!(newer("1.0.0", "0.99.99"));
         assert!(!newer("0.1.0", "0.1.0"));
         assert!(!newer("0.1.0", "0.2.0"));
+        assert!(newer("0.2.0", "0.2.0-beta.1"));
+        assert!(!newer("0.2.0-beta.1", "0.2.0"));
+        assert!(newer("0.2.0-beta.1", "0.1.1"));
     }
 
     #[test]

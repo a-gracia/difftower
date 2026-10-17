@@ -20,11 +20,11 @@ const IDEAS: &[(&str, &str)] = &[
 ];
 
 const KEYS: &[(&str, &str)] = &[
-    ("Ctrl+P", "Go to file"),
+    ("Mod+P", "Go to file"),
     ("J / K", "Next / previous file"),
     ("N / P", "Next / previous change in the file"),
-    ("Ctrl+1 … 4", "Changes, Files, Protected, Tests"),
-    ("Ctrl+Shift+T", "Run all tests"),
+    ("Mod+1 … 4", "Changes, Files, Protected, Tests"),
+    ("Mod+Shift+T", "Run all tests"),
     ("Ctrl+`", "Move the keyboard to the terminal and back"),
     ("Alt+Z", "Wrap long lines"),
     ("? or F1", "This help"),
@@ -44,12 +44,13 @@ impl Workspace {
             )
         });
         let keys = KEYS.iter().map(|(key, what)| {
+            let key = key.replace("Mod", super::MOD_KEY);
             h_flex()
                 .gap_3()
                 .text_sm()
                 .child(
                     h_flex().w(px(110.)).flex_none().child(
-                        div().flex_none().px_1p5().rounded_sm().bg(theme.secondary).child(*key),
+                        div().flex_none().px_1p5().rounded_sm().bg(theme.secondary).child(key),
                     ),
                 )
                 .child(*what)
